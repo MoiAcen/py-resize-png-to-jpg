@@ -13,11 +13,13 @@ from config import (
     SOURCE_DIR, LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE, MOVE_SCRIPT_NAME,
     SHOW_TOP_N, MAX_TARGET_FILES, MIN_ARCHIVE_SIZE_MB,
     TARGET_PNG_RATIO, ESTIMATED_REDUCTION_RATE, ARCHIVE_EXTENSIONS,
+    JPEG_PROBLEM_RATIO,
 )
 from common_utils import (
     clean_str, format_mb_or_gb, extract_all_tags,
     load_processed_files, save_clean_file,
-    load_hash_cache, save_hash_cache, get_png_ratio_with_cache,
+    load_hash_cache, save_hash_cache,
+    get_archive_image_stats, stats_png_ratio, stats_large_jpg_ratio,
 )
 
 
@@ -67,6 +69,8 @@ def main():
         'est_png_disk_mb': 0.0,
         'est_saved_disk_mb': 0.0,
         'archive_total_mb': 0.0,
+        'jpg_problem_files': 0,      # 內含過大 JPG 的包數
+        'jpg_problem_disk_mb': 0.0,  # 過大 JPG 的實體總量
     })
 
     all_files = [
@@ -77,6 +81,7 @@ def main():
     target_found_count = 0
     scanned_total_count = 0
     new_analyzed_count = 0
+    jpg_problem_found_count = 0
 
     for file_path in all_files:
         if target_found_count >= MAX_TARGET_FILES:
@@ -98,12 +103,17 @@ def main():
 
         scanned_total_count += 1
 
-        png_ratio, is_success, is_new_scan = get_png_ratio_with_cache(file_path, hash_cache)
+        stats_info, is_new_scan = get_archive_image_stats(file_path, hash_cache)
         if is_new_scan:
             new_analyzed_count += 1
 
-        # 確認無 PNG 的包，記入黑名單後跳過
-        if is_success and png_ratio == 0:
+        is_success = stats_info['success']
+        png_ratio = stats_png_ratio(stats_info)
+        large_jpg_ratio = stats_large_jpg_ratio(stats_info)
+        is_jpg_problem = large_jpg_ratio >= JPEG_PROBLEM_RATIO
+
+        # 只有「PNG 與過大 JPG 都沒有」才列入黑名單，避免 JPG 包被永久隱藏
+        if is_success and png_ratio == 0 and stats_info['large_jpg_bytes'] == 0:
             save_clean_file(file_path.name)
             continue
 
@@ -126,6 +136,10 @@ def main():
                 if png_ratio >= TARGET_PNG_RATIO:
                     stats['qualified_files'] += 1
 
+            if is_jpg_problem:
+                stats['jpg_problem_files'] += 1
+                stats['jpg_problem_disk_mb'] += archive_mb * large_jpg_ratio
+
         if png_ratio >= TARGET_PNG_RATIO:
             target_found_count += 1
             safe_tag = clean_str(tags[0])
@@ -135,6 +149,14 @@ def main():
                 f"🔥 [{cache_tag} 第 {target_found_count}/{MAX_TARGET_FILES} 個潛力包] "
                 f"[{safe_tag}] -> {safe_name} "
                 f"(PNG 佔比 {int(png_ratio * 100)}% | {format_mb_or_gb(archive_mb)})"
+            )
+        elif is_jpg_problem:
+            jpg_problem_found_count += 1
+            safe_tag = clean_str(tags[0])
+            safe_name = clean_str(file_path.name)
+            print(
+                f"🖼️ [疑似過大JPG包] [{safe_tag}] -> {safe_name} "
+                f"(過大JPG佔比 {int(large_jpg_ratio * 100)}% | {format_mb_or_gb(archive_mb)})"
             )
 
     # 儲存極速 Binary 快取
@@ -156,6 +178,8 @@ def main():
 
     print("\n" + "=" * 65)
     print(f"📊 【硬碟釋放空間推演排行榜 Top {SHOW_TOP_N}】 (本次全新解析了 {new_analyzed_count} 個檔案)")
+    if jpg_problem_found_count:
+        print(f"🖼️ 另偵測到 {jpg_problem_found_count} 個『疑似過大 JPG』包（PNG 未達標但 JPG 過大，值得 resize 逐檔體檢）")
     print("=" * 65)
 
     targets_cache_data = []
@@ -166,10 +190,18 @@ def main():
         est_saved_mb = data['est_saved_disk_mb']
         archive_mb = data['archive_total_mb']
 
+        has_jpg = data['jpg_problem_files'] > 0
+        png_connector = '├─' if has_jpg else '└─'
+
         print(f"\n🏆 Rank {rank}: [{safe_tag}]")
         print(f"    ├─ 💡 處理後預估能幫硬碟『直接空出』: ~{format_mb_or_gb(est_saved_mb)}")
         print(f"    ├─ 📦 標籤旗下壓縮檔實體總重: {format_mb_or_gb(archive_mb)} ({data['total_files']} 個檔案)")
-        print(f"    └─ 🔍 其中約有 {format_mb_or_gb(png_disk_mb)} 是由 PNG 構成的內容")
+        print(f"    {png_connector} 🔍 其中約有 {format_mb_or_gb(png_disk_mb)} 是由 PNG 構成的內容")
+        if has_jpg:
+            print(
+                f"    └─ 🖼️ 另有 {data['jpg_problem_files']} 個包含過大 JPG "
+                f"(約 {format_mb_or_gb(data['jpg_problem_disk_mb'])}，可交由 resize 逐檔體檢)"
+            )
 
         targets_cache_data.append({
             'rank': rank,

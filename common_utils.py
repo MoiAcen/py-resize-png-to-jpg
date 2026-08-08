@@ -15,6 +15,7 @@ import zipfile
 from config import (
     LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
     MIN_SINGLE_PNG_KB, POSSIBLE_7Z_PATHS, IGNORED_TAG_KEYS,
+    JPEG_EXTENSIONS, JPEG_LARGE_KB,
 )
 
 
@@ -124,26 +125,43 @@ def find_7z():
 SEVEN_ZIP_PATH = find_7z()
 
 
-# ================= PNG 佔比精算（核心）=================
-def get_png_ratio_with_cache(file_path, hash_cache, min_single_kb=MIN_SINGLE_PNG_KB):
-    """只讀壓縮檔的檔頭清單，計算內部 PNG 容量佔比。
+# ================= 壓縮包影像帳（核心）=================
+# 快取版本：格式變動時遞增，舊版快取會自動重算
+_STATS_CACHE_VERSION = 2
+
+
+def get_archive_image_stats(file_path, hash_cache):
+    """只讀壓縮檔的檔頭清單，統計 PNG / JPG 容量帳。
 
     zip 直接用 Python zipfile 讀，其餘格式呼叫 7-Zip 列出清單解析。
-    命中快取則直接回傳，不重複掃描。
+    命中快取（且版本相符）則直接回傳，不重複掃描。
 
-    回傳: (png 佔比, 是否成功, 是否為本次全新解析)
+    回傳: (stats: dict, 是否為本次全新解析)
+      stats 內含 success / total_bytes / png_bytes / jpg_bytes / large_jpg_bytes
+      - png_bytes：只計單張 >= MIN_SINGLE_PNG_KB 的 PNG
+      - large_jpg_bytes：只計單張 >= JPEG_LARGE_KB 的 JPG（過大候選）
     """
     hash_key = get_file_hash_key(file_path)
-
     if hash_key and hash_key in hash_cache:
-        cached_info = hash_cache[hash_key]
-        return cached_info['ratio'], cached_info['success'], False
+        cached = hash_cache[hash_key]
+        if cached.get('v') == _STATS_CACHE_VERSION:
+            return cached, False
 
     ext = file_path.suffix.lower()
-    total_bytes = 0
-    png_bytes = 0
-    min_bytes = min_single_kb * 1024
+    min_png_bytes = MIN_SINGLE_PNG_KB * 1024
+    large_jpg_bytes_th = JPEG_LARGE_KB * 1024
+    acc = {'total': 0, 'png': 0, 'jpg': 0, 'large_jpg': 0}
     is_success = False
+
+    def account(name_lower, size):
+        acc['total'] += size
+        if name_lower.endswith('.png'):
+            if size >= min_png_bytes:
+                acc['png'] += size
+        elif name_lower.endswith(JPEG_EXTENSIONS):
+            acc['jpg'] += size
+            if size >= large_jpg_bytes_th:
+                acc['large_jpg'] += size
 
     if ext == '.zip':
         try:
@@ -151,9 +169,7 @@ def get_png_ratio_with_cache(file_path, hash_cache, min_single_kb=MIN_SINGLE_PNG
                 for item in zf.infolist():
                     if item.is_dir():
                         continue
-                    total_bytes += item.file_size
-                    if item.filename.lower().endswith('.png') and item.file_size >= min_bytes:
-                        png_bytes += item.file_size
+                    account(item.filename.lower(), item.file_size)
             is_success = True
         except Exception:
             is_success = False
@@ -179,25 +195,43 @@ def get_png_ratio_with_cache(file_path, hash_cache, min_single_kb=MIN_SINGLE_PNG
                 attr, size_str = match.group(1), match.group(2)
                 if 'D' in attr.upper():   # 跳過資料夾項目
                     continue
-
-                file_size = int(size_str)
-                total_bytes += file_size
-                if line_str.lower().endswith('.png') and file_size >= min_bytes:
-                    png_bytes += file_size
+                # 7-Zip 清單的檔名在行尾，直接用整行小寫比對副檔名
+                account(line_str.lower(), int(size_str))
             is_success = True
         except Exception:
             is_success = False
 
-    ratio = (png_bytes / total_bytes) if (total_bytes > 0 and is_success) else 0.0
-
+    stats = {
+        'v': _STATS_CACHE_VERSION,
+        'filename': file_path.name,
+        'success': is_success,
+        'total_bytes': acc['total'],
+        'png_bytes': acc['png'],
+        'jpg_bytes': acc['jpg'],
+        'large_jpg_bytes': acc['large_jpg'],
+    }
     if hash_key and is_success:
-        hash_cache[hash_key] = {
-            'filename': file_path.name,
-            'ratio': ratio,
-            'success': is_success,
-        }
+        hash_cache[hash_key] = stats
 
-    return ratio, is_success, True
+    return stats, True
+
+
+def stats_png_ratio(stats):
+    """由 stats 算 PNG 容量佔比。"""
+    total = stats['total_bytes']
+    return (stats['png_bytes'] / total) if (total > 0 and stats['success']) else 0.0
+
+
+def stats_large_jpg_ratio(stats):
+    """由 stats 算『過大 JPG』容量佔比（問題包指標）。"""
+    total = stats['total_bytes']
+    return (stats['large_jpg_bytes'] / total) if (total > 0 and stats['success']) else 0.0
+
+
+def get_png_ratio_with_cache(file_path, hash_cache, min_single_kb=MIN_SINGLE_PNG_KB):
+    """相容包裝：沿用舊介面回傳 (png 佔比, 是否成功, 是否為本次全新解析)。"""
+    stats, is_new = get_archive_image_stats(file_path, hash_cache)
+    return stats_png_ratio(stats), stats['success'], is_new
 
 
 # ================= 檔名防撞 =================

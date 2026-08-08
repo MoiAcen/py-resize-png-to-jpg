@@ -38,6 +38,24 @@ OVERWRITE_EXISTING_ZIP = False  # 遇到其他同名 ZIP：False = 自動加 (1)
 # 轉檔併發數：扣掉 4 個核心留給其他服務（至少保留 1 個 Worker）
 MAX_WORKERS = max(1, (os.cpu_count() or 8) - 4)
 
+# ================= JPG 體檢 / 瘦身門檻 =================
+JPEG_EXTENSIONS = ('.jpg', '.jpeg')
+
+# --- 分析階段（analysis.py）：靠檔案大小快速篩「問題包」候選 ---
+JPEG_LARGE_KB      = 2048   # 單張 JPG 超過此大小 (KB) 視為「可能過大」候選
+JPEG_PROBLEM_RATIO = 0.30   # 過大 JPG 佔壓縮包內容比例達此值 → 標記為問題包
+
+# --- resize 階段：逐檔讀 marker 判斷該不該修正 ---
+JPEG_MAX_LONG_EDGE          = 4000  # 長邊超過此像素 → 標記解析度過大（僅提示，暫不縮圖）
+JPEG_RECOMPRESS_MIN_QUALITY = 95    # 估算品質 >= 此值才建議重壓
+JPEG_SKIP_BELOW_QUALITY     = 85    # 估算品質 < 此值 → 跳過以保護畫質
+
+# 修正模式：'report' = 只判斷並列出報告、不改檔（預設，最安全）
+#           'off'    = 完全不做 JPG 體檢
+# （無損 / 重壓 / 縮圖等實際修檔待確認方法後再開啟）
+JPEG_FIX_MODE     = 'report'
+JPEG_TARGET_QUALITY = 92    # 未來啟用重壓時的目標品質
+
 # ================= 共用常數 =================
 # 支援掃描 / 處理的壓縮格式（副檔名皆為小寫）
 ARCHIVE_EXTENSIONS = ('.zip', '.rar', '.7z')

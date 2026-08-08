@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -18,9 +19,10 @@ from PIL import Image
 
 from config import (
     TARGET_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
-    MAX_WORKERS, ARCHIVE_EXTENSIONS,
+    MAX_WORKERS, ARCHIVE_EXTENSIONS, JPEG_EXTENSIONS, JPEG_FIX_MODE,
 )
 from common_utils import clean_str, format_mb_or_gb, SEVEN_ZIP_PATH
+from jpeg_inspector import inspect_jpeg, classify_jpeg
 
 
 def get_safe_output_path(target_zip_path, current_archive_path=None):
@@ -127,6 +129,31 @@ def convert_single_image_worker(args):
         return False
 
 
+def report_jpeg_health(all_extracted_files):
+    """對解壓後的 JPG 逐檔讀 marker 體檢，印出『需不需要修正』彙總（不改檔）。"""
+    jpg_files = [f for f in all_extracted_files if f.suffix.lower() in JPEG_EXTENSIONS]
+    if not jpg_files:
+        return
+
+    buckets = defaultdict(lambda: {'count': 0, 'reasons': Counter()})
+    need_fix = 0
+    for jf in jpg_files:
+        result = classify_jpeg(inspect_jpeg(jf))
+        bucket = buckets[result['action']]
+        bucket['count'] += 1
+        for reason in result['reasons']:
+            bucket['reasons'][reason.split('(')[0]] += 1   # 去掉括號內數字做彙總
+        if result['needs_fix']:
+            need_fix += 1
+
+    print(f"  🖼️ JPG 體檢: 共 {len(jpg_files)} 張，建議修正 {need_fix} 張 (模式: {JPEG_FIX_MODE})")
+    for action, info in sorted(buckets.items(), key=lambda kv: -kv[1]['count']):
+        if action == 'skip':
+            continue
+        reason_str = ', '.join(f'{k}×{v}' for k, v in info['reasons'].most_common())
+        print(f"     └─ [{action}] {info['count']} 張  ({reason_str})")
+
+
 def slim_single_archive(archive_path, pool, temp_work_base):
     """處理單一壓縮包：解壓 → 轉檔 → 重打包 → 驗收替換。"""
     safe_name = clean_str(os.path.basename(archive_path))
@@ -148,6 +175,10 @@ def slim_single_archive(archive_path, pool, temp_work_base):
 
         all_extracted_files = [f for f in temp_dir_path.glob("**/*") if f.is_file()]
         png_files = [f for f in all_extracted_files if f.suffix.lower() == '.png']
+
+        # 逐檔 JPG 體檢（預設只判斷、印報告，不改檔）
+        if JPEG_FIX_MODE != 'off':
+            report_jpeg_health(all_extracted_files)
 
         if not png_files:
             print(f"⏭️ 跳過：內部無 PNG 圖片 [{safe_name}] 喵！")
