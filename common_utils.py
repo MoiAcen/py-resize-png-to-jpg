@@ -126,8 +126,10 @@ SEVEN_ZIP_PATH = find_7z()
 
 
 # ================= 壓縮包影像帳（核心）=================
-# 快取版本：格式變動時遞增，舊版快取會自動重算
-_STATS_CACHE_VERSION = 2
+# 快取簽章：把「格式版本 + 會影響統計結果的門檻」一起編進 key。
+# 任一門檻改變（例如調整 JPEG_LARGE_KB / MIN_SINGLE_PNG_KB）時，舊快取自動
+# 失效重算，不需手動清快取。
+_STATS_CACHE_VERSION = f"3|png{MIN_SINGLE_PNG_KB}|jpg{JPEG_LARGE_KB}"
 
 
 def get_archive_image_stats(file_path, hash_cache):
