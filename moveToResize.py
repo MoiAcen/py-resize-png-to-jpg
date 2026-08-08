@@ -3,6 +3,7 @@
 讀取排行榜快取（或現場關鍵字精算），讓使用者挑選要處理的標籤，
 把達標的壓縮包搬到瘦身工作區，並可接續啟動轉檔腳本喵！
 """
+import json
 import os
 import re
 import shutil
@@ -13,13 +14,14 @@ from pathlib import Path
 
 from config import (
     SOURCE_DIR, TARGET_DIR, LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
-    RESIZE_SCRIPT_NAME, MIN_ARCHIVE_SIZE_MB, TARGET_PNG_RATIO,
-    ESTIMATED_REDUCTION_RATE, ARCHIVE_EXTENSIONS,
+    RESIZE_SCRIPT_NAME, MIN_ARCHIVE_SIZE_MB, ESTIMATED_REDUCTION_RATE,
+    ESTIMATED_JPG_REDUCTION_RATE, JPEG_PROBLEM_RATIO, ARCHIVE_EXTENSIONS,
 )
 from common_utils import (
     clean_str, format_mb_or_gb, extract_all_tags, load_processed_files,
     save_clean_file, load_targets_cache, load_hash_cache, save_hash_cache,
-    get_png_ratio_with_cache, get_safe_destination,
+    get_archive_image_stats, stats_png_ratio, stats_large_jpg_ratio,
+    is_slim_target, get_safe_destination,
 )
 
 
@@ -61,6 +63,7 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
         'qualified_count': 0,
         'archive_total_mb': 0.0,
         'est_png_disk_mb': 0.0,
+        'est_jpg_disk_mb': 0.0,
         'est_saved_disk_mb': 0.0,
     })
 
@@ -85,12 +88,17 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
         if archive_mb < MIN_ARCHIVE_SIZE_MB:
             continue
 
-        png_ratio, is_success, _ = get_png_ratio_with_cache(file_path, hash_cache)
+        stats_info, _ = get_archive_image_stats(file_path, hash_cache)
+        is_success = stats_info['success']
+        png_ratio = stats_png_ratio(stats_info)
+        large_jpg_ratio = stats_large_jpg_ratio(stats_info)
 
-        if is_success and png_ratio == 0:
+        # 只有「PNG 與過大 JPG 都沒有」才列黑名單
+        if is_success and png_ratio == 0 and stats_info['large_jpg_bytes'] == 0:
             save_clean_file(file_path.name)
             continue
 
+        target = is_slim_target(stats_info)
         matched_files_count += 1
 
         for raw_tag in matched_tags:
@@ -100,13 +108,16 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
                 stats['display_name'] = raw_tag
 
             png_disk_mb = archive_mb * png_ratio
-            saved_disk_mb = png_disk_mb * ESTIMATED_REDUCTION_RATE
+            jpg_disk_mb = archive_mb * large_jpg_ratio if large_jpg_ratio >= JPEG_PROBLEM_RATIO else 0.0
+            saved_disk_mb = (png_disk_mb * ESTIMATED_REDUCTION_RATE
+                             + jpg_disk_mb * ESTIMATED_JPG_REDUCTION_RATE)
 
             stats['archive_total_mb'] += archive_mb
             stats['est_png_disk_mb'] += png_disk_mb
+            stats['est_jpg_disk_mb'] += jpg_disk_mb
             stats['est_saved_disk_mb'] += saved_disk_mb
 
-            if png_ratio >= TARGET_PNG_RATIO:
+            if target:
                 stats['qualified_count'] += 1
 
     save_hash_cache(hash_cache)
@@ -125,10 +136,12 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
         safe_tag = clean_str(r['display_name'])
         total_mb_str = format_mb_or_gb(r['archive_total_mb'])
         png_mb_str = format_mb_or_gb(r['est_png_disk_mb'])
+        jpg_mb_str = format_mb_or_gb(r['est_jpg_disk_mb'])
         save_mb_str = format_mb_or_gb(r['est_saved_disk_mb'])
         print(
             f" [{idx}] [{safe_tag}] ── 達標包: {r['qualified_count']} 個 | "
-            f"PNG佔用: {png_mb_str} | 預估可空出: ~{save_mb_str} (檔案總重 {total_mb_str})"
+            f"PNG: {png_mb_str} | 過大JPG: {jpg_mb_str} | "
+            f"預估可空出: ~{save_mb_str} (檔案總重 {total_mb_str})"
         )
 
     print("-" * 75)
@@ -147,7 +160,36 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
     return None
 
 
-def move_files_for_pattern(src_path, dst_path, processed_files, hash_cache, search_regex, target_kw=None):
+def remove_tags_from_targets_cache(moved_tags):
+    """搬移完成後，只從排行榜快取移除已處理的標籤，其餘保留（全部清空才刪檔）。"""
+    if not moved_tags or not os.path.exists(TARGETS_CACHE):
+        return
+    targets = load_targets_cache()
+    if not targets:
+        return
+
+    moved_lower = {t.lower() for t in moved_tags}
+    remaining = [t for t in targets if t.get('tag', '').lower() not in moved_lower]
+    removed = len(targets) - len(remaining)
+    if removed == 0:
+        return
+
+    try:
+        if remaining:
+            # 重新編號 rank，讓選單維持連續
+            for new_rank, item in enumerate(remaining, start=1):
+                item['rank'] = new_rank
+            with open(TARGETS_CACHE, 'w', encoding='utf-8') as f:
+                json.dump(remaining, f, ensure_ascii=False, indent=2)
+        else:
+            os.remove(TARGETS_CACHE)
+        print(f"🧾 已從排行榜快取移除 {removed} 個已處理標籤，其餘 {len(remaining)} 個保留喵！")
+    except Exception as e:
+        print(f"⚠️ 更新排行榜快取失敗: {e}")
+
+
+def move_files_for_pattern(src_path, dst_path, processed_files, hash_cache, search_regex,
+                           target_kw=None, selected_tags=None):
     """依標籤正則（或全域）搬移達標的壓縮包到目標資料夾。"""
     all_files = list_archives(src_path)
 
@@ -174,9 +216,9 @@ def move_files_for_pattern(src_path, dst_path, processed_files, hash_cache, sear
                 skipped_count += 1
                 continue
 
-        png_ratio, is_success, _ = get_png_ratio_with_cache(file_path, hash_cache)
+        stats_info, _ = get_archive_image_stats(file_path, hash_cache)
 
-        if is_success and png_ratio >= TARGET_PNG_RATIO:
+        if is_slim_target(stats_info):
             safe_dst_path = get_safe_destination(dst_path / file_path.name)
             safe_name = clean_str(file_path.name)
             try:
@@ -196,11 +238,7 @@ def move_files_for_pattern(src_path, dst_path, processed_files, hash_cache, sear
     print("=" * 65)
 
     if moved_count > 0:
-        if os.path.exists(TARGETS_CACHE):
-            try:
-                os.remove(TARGETS_CACHE)
-            except Exception:
-                pass
+        remove_tags_from_targets_cache(selected_tags)
         trigger_resize_prompt()
 
 
@@ -228,35 +266,17 @@ def trigger_resize_prompt():
     print("=" * 65)
 
 
-def main():
-    src_path = Path(SOURCE_DIR).resolve()
-    dst_path = Path(TARGET_DIR).resolve()
-
-    if not src_path.exists():
-        print(f"❌ 錯誤：來源目錄 [{SOURCE_DIR}] 不存在喵！")
-        return
-
-    dst_path.mkdir(parents=True, exist_ok=True)
-    processed_files = load_processed_files()
-    targets = load_targets_cache()
-    hash_cache = load_hash_cache()
-
-    print("========================================")
-    print("🐱 互動式搬移工具 - 檔名 Hash 快取雙引擎版 (moveToResize.py) 喵！")
-    print("========================================\n")
-
-    selected_tags = []
-    target_kw = None
-
-    # 不論有沒有 targets 快取，通通展示完整的功能選單
+def print_menu(targets):
+    """印出主選單（含排行榜快取內容，若有）。"""
     if targets:
         print("📋 【從 analysis.py 載入的排行榜選單】：")
         print("-" * 75)
         for t in targets:
             tag_name = clean_str(t['tag'])
             png_str = format_mb_or_gb(t['png_mb'])
+            jpg_str = format_mb_or_gb(t.get('jpg_mb', 0))
             save_str = format_mb_or_gb(t['est_saved_mb'])
-            print(f" [{t['rank']}] [{tag_name}] ── PNG佔用: {png_str} | 預估可省 ~{save_str}")
+            print(f" [{t['rank']}] [{tag_name}] ── PNG: {png_str} | 過大JPG: {jpg_str} | 預估可省 ~{save_str}")
     else:
         print("💡 提醒：目前無排行榜快取 (不影響搜尋，可直接輸入 [F] 進行即時精算) 喵！")
 
@@ -267,52 +287,97 @@ def main():
     print(" [0] 全域掃描所有符合條件的檔案")
     print(" [M] 手動輸入標籤進行精準比對")
     print(" [C] 徹底清除所有舊快取檔 (包含黑名單與舊 Hash 快取)")
+    print(" [Q] 離開")
     print("-" * 75)
 
-    user_choice = input("👉 請選擇要執行的選項: ").strip().upper()
 
+def resolve_selection(user_choice, targets, src_path, processed_files, hash_cache):
+    """把使用者選項解析成 (selected_tags, target_kw)；回傳 None 代表本輪不執行搬移。"""
     if user_choice == 'A':
         if not targets:
             print("⚠️ 目前沒有排行榜快取，請改用 [F] 關鍵字搜尋喵！")
-            return
+            return None
         selected_tags = [t['tag'] for t in targets]
         print(f"\n🚀 已選擇搬移 Top {len(selected_tags)} 全榜標籤喵！")
-    elif user_choice == 'F':
+        return selected_tags, None
+
+    if user_choice == 'F':
         kw = input("\n👉 請輸入要搜尋精算的標籤關鍵字 (例如: Kurohime): ").strip()
         if not kw:
             print("⚠️ 未輸入關鍵字喵！")
-            return
-        target_kw = kw
+            return None
         res_tags = smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache)
         if not res_tags:
-            return
-        selected_tags = res_tags
-        print(f"\n🚀 已精準鎖定選擇 {len(selected_tags)} 個標籤進行搬移喵！")
-    elif user_choice == '0':
-        selected_tags = []
+            return None
+        print(f"\n🚀 已精準鎖定選擇 {len(res_tags)} 個標籤進行搬移喵！")
+        return res_tags, kw
+
+    if user_choice == '0':
         print("\n🚀 已選擇全域檢查搬移喵！")
-    elif user_choice == 'C':
-        clear_all_caches()
-        return
-    elif user_choice == 'M':
+        return [], None
+
+    if user_choice == 'M':
         raw_in = input("👉 請輸入要比對的標籤文字: ").strip()
-        if raw_in:
-            selected_tags = [raw_in]
-    elif user_choice.isdigit():
+        if not raw_in:
+            print("⚠️ 未輸入標籤喵！")
+            return None
+        return [raw_in], None
+
+    if user_choice.isdigit():
         if not targets:
             print("❌ 當前無排行榜選單，請選擇 [F] 輸入關鍵字進行搜尋喵！")
-            return
+            return None
         idx = int(user_choice)
         if not (1 <= idx <= len(targets)):
             print("❌ 無效的數字選項喵！")
-            return
+            return None
         selected_tags = [targets[idx - 1]['tag']]
         print(f"\n🚀 已選擇標籤: [{selected_tags[0]}] 喵！")
-    else:
-        print("❌ 輸入無效喵！")
+        return selected_tags, None
+
+    print("❌ 輸入無效喵！")
+    return None
+
+
+def main():
+    src_path = Path(SOURCE_DIR).resolve()
+    dst_path = Path(TARGET_DIR).resolve()
+
+    if not src_path.exists():
+        print(f"❌ 錯誤：來源目錄 [{SOURCE_DIR}] 不存在喵！")
         return
 
-    if selected_tags or user_choice == '0':
+    dst_path.mkdir(parents=True, exist_ok=True)
+    processed_files = load_processed_files()
+    hash_cache = load_hash_cache()
+
+    print("========================================")
+    print("🐱 互動式搬移工具 - 檔名 Hash 快取雙引擎版 (moveToResize.py) 喵！")
+    print("========================================\n")
+
+    # 主選單迴圈：每次動作結束後回到選單，直到選 [Q] 離開
+    while True:
+        targets = load_targets_cache()   # 每輪重讀，反映搬移後已移除的標籤
+        print_menu(targets)
+
+        user_choice = input("👉 請選擇要執行的選項: ").strip().upper()
+
+        if user_choice == 'Q':
+            print("👋 掰掰喵！(ฅ'ω'ฅ)")
+            break
+
+        if user_choice == 'C':
+            clear_all_caches()
+            print()
+            continue
+
+        selection = resolve_selection(user_choice, targets, src_path, processed_files, hash_cache)
+        if selection is None:
+            print()
+            continue
+
+        selected_tags, target_kw = selection
+
         if selected_tags:
             escaped_patterns = [
                 r'[\(【\[\（]\s*' + re.escape(t) + r'\s*[\)】\]\）]'
@@ -322,7 +387,9 @@ def main():
         else:
             search_regex = None
 
-        move_files_for_pattern(src_path, dst_path, processed_files, hash_cache, search_regex, target_kw)
+        move_files_for_pattern(src_path, dst_path, processed_files, hash_cache,
+                               search_regex, target_kw, selected_tags)
+        print()   # 回到選單前空一行
 
 
 if __name__ == '__main__':

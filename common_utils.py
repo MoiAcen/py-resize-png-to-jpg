@@ -15,7 +15,7 @@ import zipfile
 from config import (
     LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
     MIN_SINGLE_PNG_KB, POSSIBLE_7Z_PATHS, IGNORED_TAG_KEYS,
-    JPEG_EXTENSIONS, JPEG_LARGE_KB,
+    JPEG_EXTENSIONS, JPEG_LARGE_KB, TARGET_PNG_RATIO, JPEG_PROBLEM_RATIO,
 )
 
 
@@ -226,6 +226,17 @@ def stats_large_jpg_ratio(stats):
     """由 stats 算『過大 JPG』容量佔比（問題包指標）。"""
     total = stats['total_bytes']
     return (stats['large_jpg_bytes'] / total) if (total > 0 and stats['success']) else 0.0
+
+
+def is_slim_target(stats):
+    """統一的『值得瘦身』判準：達標 PNG 佔比，或過大 JPG 佔比達門檻。
+
+    analysis / moveToResize / 關鍵字搜尋共用同一判準，避免 JPG 包在中途被濾掉。
+    """
+    if not stats['success']:
+        return False
+    return (stats_png_ratio(stats) >= TARGET_PNG_RATIO
+            or stats_large_jpg_ratio(stats) >= JPEG_PROBLEM_RATIO)
 
 
 def get_png_ratio_with_cache(file_path, hash_cache, min_single_kb=MIN_SINGLE_PNG_KB):

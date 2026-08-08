@@ -13,7 +13,7 @@ from config import (
     SOURCE_DIR, LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE, MOVE_SCRIPT_NAME,
     SHOW_TOP_N, MAX_TARGET_FILES, MIN_ARCHIVE_SIZE_MB,
     TARGET_PNG_RATIO, ESTIMATED_REDUCTION_RATE, ARCHIVE_EXTENSIONS,
-    JPEG_PROBLEM_RATIO,
+    JPEG_PROBLEM_RATIO, ESTIMATED_JPG_REDUCTION_RATE,
 )
 from common_utils import (
     clean_str, format_mb_or_gb, extract_all_tags,
@@ -136,9 +136,12 @@ def main():
                 if png_ratio >= TARGET_PNG_RATIO:
                     stats['qualified_files'] += 1
 
+            # 過大 JPG 的預估節省也計入排序，讓 JPG 包能上榜、進搬移選單
             if is_jpg_problem:
+                jpg_disk_mb = archive_mb * large_jpg_ratio
                 stats['jpg_problem_files'] += 1
-                stats['jpg_problem_disk_mb'] += archive_mb * large_jpg_ratio
+                stats['jpg_problem_disk_mb'] += jpg_disk_mb
+                stats['est_saved_disk_mb'] += jpg_disk_mb * ESTIMATED_JPG_REDUCTION_RATE
 
         if png_ratio >= TARGET_PNG_RATIO:
             target_found_count += 1
@@ -207,6 +210,7 @@ def main():
             'rank': rank,
             'tag': data['display_name'],
             'png_mb': png_disk_mb,
+            'jpg_mb': data['jpg_problem_disk_mb'],
             'est_saved_mb': est_saved_mb,
             'total_files': data['total_files'],
             'archive_total_mb': archive_mb,

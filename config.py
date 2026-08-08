@@ -42,8 +42,9 @@ MAX_WORKERS = max(1, (os.cpu_count() or 8) - 4)
 JPEG_EXTENSIONS = ('.jpg', '.jpeg')
 
 # --- 分析階段（analysis.py）：靠檔案大小快速篩「問題包」候選 ---
-JPEG_LARGE_KB      = 2048   # 單張 JPG 超過此大小 (KB) 視為「可能過大」候選
-JPEG_PROBLEM_RATIO = 0.30   # 過大 JPG 佔壓縮包內容比例達此值 → 標記為問題包
+JPEG_LARGE_KB      = 1024   # 單張 JPG 超過此大小 (KB) 視為「可能過大」候選（排除縮圖/雜圖）
+JPEG_PROBLEM_RATIO = 0.30   # 過大 JPG 佔壓縮包內容比例達此值 → 視為值得瘦身的目標
+ESTIMATED_JPG_REDUCTION_RATE = 0.20   # 預估過大 JPG 重整後可省下的體積比例（保守估算，僅供排序）
 
 # --- resize 階段：逐檔讀 marker 判斷該不該修正 ---
 JPEG_MAX_LONG_EDGE          = 4000  # 長邊超過此像素 → 標記解析度過大（僅提示，暫不縮圖）
