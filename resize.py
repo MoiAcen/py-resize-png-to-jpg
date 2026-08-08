@@ -4,6 +4,7 @@
 以「檔案數量吻合」為驗收條件，通過才替換原檔並繼承修改時間喵！
 （多核並行；使用短路徑暫存區規避 Windows 260 字元路徑限制。）
 """
+import io
 import os
 import shutil
 import stat
@@ -20,9 +21,16 @@ from PIL import Image
 from config import (
     TARGET_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
     MAX_WORKERS, ARCHIVE_EXTENSIONS, JPEG_EXTENSIONS, JPEG_FIX_MODE,
+    JPEG_TARGET_QUALITY, JPEG_TARGET_SUBSAMPLING,
 )
 from common_utils import clean_str, format_mb_or_gb, SEVEN_ZIP_PATH
 from jpeg_inspector import inspect_jpeg, classify_jpeg
+
+# mozjpeg 無損最佳化（pip 套件，內建 mozjpeg，免外部 exe）；未安裝則 A 略過
+try:
+    import mozjpeg_lossless_optimization as _mlo
+except Exception:
+    _mlo = None
 
 
 def get_safe_output_path(target_zip_path, current_archive_path=None):
@@ -154,6 +162,84 @@ def report_jpeg_health(all_extracted_files):
         print(f"     └─ [{action}] {info['count']} 張  ({reason_str})")
 
 
+def _optimize_lossless(jpeg_bytes):
+    """A：mozjpeg 無損最佳化（零像素變化）；套件未安裝回 None。"""
+    if _mlo is None:
+        return None
+    try:
+        return _mlo.optimize(jpeg_bytes)
+    except Exception:
+        return None
+
+
+def _recompress_bytes(img_path, quality, subsampling):
+    """B：以目標品質/抽樣重新編碼，再接一次無損擠壓，回傳新位元組。"""
+    with Image.open(img_path) as im:
+        if im.mode != 'RGB':
+            im = im.convert('RGB')
+        buf = io.BytesIO()
+        im.save(buf, format='JPEG', quality=quality, subsampling=subsampling,
+                optimize=True, progressive=True)
+    out = buf.getvalue()
+    squeezed = _optimize_lossless(out)
+    return squeezed if (squeezed and len(squeezed) < len(out)) else out
+
+
+def jpeg_fix_worker(args):
+    """Worker：依路由對單張 JPG 做 A/B 處理，僅在變小時替換並繼承時間。"""
+    img_path_str, route, quality, subsampling = args
+    img_path = Path(img_path_str)
+    try:
+        orig_stat = img_path.stat()
+        if route == 'B':
+            new_bytes = _recompress_bytes(img_path, quality, subsampling)
+        else:   # A 無損
+            with open(img_path, 'rb') as f:
+                new_bytes = _optimize_lossless(f.read())
+
+        if new_bytes and len(new_bytes) < orig_stat.st_size:
+            with open(img_path, 'wb') as f:
+                f.write(new_bytes)
+            try:
+                os.utime(img_path, (orig_stat.st_atime, orig_stat.st_mtime))
+            except Exception:
+                pass
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def process_jpegs_auto(jpg_files, pool):
+    """auto 模式：逐檔體檢分流到 A(無損)/B(重壓)，並行處理，回傳實際替換張數。"""
+    if not jpg_files:
+        return 0
+
+    tasks = []
+    diag = Counter()
+    for jf in jpg_files:
+        result = classify_jpeg(inspect_jpeg(jf))
+        action = result['action']
+        if not result['needs_fix'] or action == 'skip':
+            diag['skip'] += 1
+            continue
+        # downscale 目前刻意不做 → 非重壓類一律走 A 無損
+        route = 'B' if 'recompress' in action else 'A'
+        diag[route] += 1
+        tasks.append((str(jf), route, JPEG_TARGET_QUALITY, JPEG_TARGET_SUBSAMPLING))
+
+    if not tasks:
+        return 0
+
+    futures = [pool.submit(jpeg_fix_worker, t) for t in tasks]
+    fixed = sum(1 for f in as_completed(futures) if f.result())
+    print(
+        f"  🖼️ JPG 修正: A無損×{diag['A']} / B重壓×{diag['B']} / 跳過×{diag['skip']} "
+        f"→ 實際變小並替換 {fixed} 張"
+    )
+    return fixed
+
+
 def slim_single_archive(archive_path, pool, temp_work_base):
     """處理單一壓縮包：解壓 → 轉檔 → 重打包 → 驗收替換。"""
     safe_name = clean_str(os.path.basename(archive_path))
@@ -175,21 +261,27 @@ def slim_single_archive(archive_path, pool, temp_work_base):
 
         all_extracted_files = [f for f in temp_dir_path.glob("**/*") if f.is_file()]
         png_files = [f for f in all_extracted_files if f.suffix.lower() == '.png']
-
-        # 逐檔 JPG 體檢（預設只判斷、印報告，不改檔）
-        if JPEG_FIX_MODE != 'off':
-            report_jpeg_health(all_extracted_files)
-
-        if not png_files:
-            print(f"⏭️ 跳過：內部無 PNG 圖片 [{safe_name}] 喵！")
-            return
+        jpg_files = [f for f in all_extracted_files if f.suffix.lower() in JPEG_EXTENSIONS]
 
         input_item_count = len(all_extracted_files)
 
-        # 2. 派工器分派轉檔任務
-        tasks = [(str(png_path), QUALITY) for png_path in png_files]
-        futures = [pool.submit(convert_single_image_worker, task) for task in tasks]
-        converted_cnt = sum(1 for f in as_completed(futures) if f.result())
+        # JPG 逐檔體檢 / 修正
+        jpg_fixed = 0
+        if JPEG_FIX_MODE == 'report':
+            report_jpeg_health(all_extracted_files)
+        elif JPEG_FIX_MODE == 'auto':
+            jpg_fixed = process_jpegs_auto(jpg_files, pool)
+
+        if not png_files and jpg_fixed == 0:
+            print(f"⏭️ 跳過：無可瘦身內容（PNG 或可修正 JPG）[{safe_name}] 喵！")
+            return
+
+        # 2. 派工器分派 PNG 轉檔任務（若有）
+        converted_cnt = 0
+        if png_files:
+            tasks = [(str(png_path), QUALITY) for png_path in png_files]
+            futures = [pool.submit(convert_single_image_worker, task) for task in tasks]
+            converted_cnt = sum(1 for f in as_completed(futures) if f.result())
 
         # 3. 重新打包成 ZIP
         base_filename, _ = os.path.splitext(archive_path)
@@ -214,7 +306,7 @@ def slim_single_archive(archive_path, pool, temp_work_base):
 
         print(
             f"  📊 核對: 原有 {input_item_count} 檔 ──> 產出 {output_item_count} 檔 "
-            f"(處理 {converted_cnt} 張 PNG，總耗時 {total_time:.1f} 秒)"
+            f"(處理 {converted_cnt} 張 PNG + 修正 {jpg_fixed} 張 JPG，總耗時 {total_time:.1f} 秒)"
         )
 
         # 4. 驗收、時間繼承與替換
@@ -273,6 +365,11 @@ def main():
     print("========================================")
     print(f"🐱 找到 {len(all_files)} 個壓縮包，啟動【短路徑破解 + 詳細除錯版】[resize.py]...")
     print(f"🚀 總核心數: {total_cpus} | 系統保留: 4 核心 | 轉檔 WorkPool: {MAX_WORKERS} Workers")
+    if JPEG_FIX_MODE == 'auto':
+        mlo_state = '可用' if _mlo else '未安裝（A 無損將略過，B 僅用 PIL 重壓）'
+        print(f"🖼️ JPG 修正模式: auto | mozjpeg 無損套件: {mlo_state}")
+    elif JPEG_FIX_MODE == 'report':
+        print("🖼️ JPG 修正模式: report（只體檢、不改檔）")
     print("========================================\n")
 
     try:

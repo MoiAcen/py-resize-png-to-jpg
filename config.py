@@ -50,11 +50,16 @@ JPEG_MAX_LONG_EDGE          = 4000  # 長邊超過此像素 → 標記解析度�
 JPEG_RECOMPRESS_MIN_QUALITY = 95    # 估算品質 >= 此值才建議重壓
 JPEG_SKIP_BELOW_QUALITY     = 85    # 估算品質 < 此值 → 跳過以保護畫質
 
-# 修正模式：'report' = 只判斷並列出報告、不改檔（預設，最安全）
-#           'off'    = 完全不做 JPG 體檢
-# （無損 / 重壓 / 縮圖等實際修檔待確認方法後再開啟）
-JPEG_FIX_MODE     = 'report'
-JPEG_TARGET_QUALITY = 92    # 未來啟用重壓時的目標品質
+# 修正模式：
+#   'report' = 只判斷並列出報告、不改檔（預設，最安全）
+#   'auto'   = 依體檢結果自動分流修正，沿用「變小才替換」驗收
+#              A 無損：mozjpeg 無損最佳化（零畫質損失）
+#              B 重壓：PIL 以目標品質/抽樣重編 → 再接 A 無損擠壓
+#   'off'    = 完全不做 JPG 體檢
+# （A/B 皆用 pip 套件 mozjpeg-lossless-optimization，免裝外部 exe）
+JPEG_FIX_MODE           = 'report'
+JPEG_TARGET_QUALITY     = 92   # auto 模式 B（重壓）的目標品質
+JPEG_TARGET_SUBSAMPLING = 2    # B 重壓的色度抽樣：2 = 4:2:0（省空間、肉眼幾乎無感）
 
 # ================= 共用常數 =================
 # 支援掃描 / 處理的壓縮格式（副檔名皆為小寫）
