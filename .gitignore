@@ -218,6 +218,9 @@ __marimo__/
 .streamlit/secrets.toml
 
 # ================= 本專案執行期產生的快取 / 紀錄檔 =================
-analysis.bin            # 無 PNG 黑名單 (LOG_FILE)
-file_hash_cache.bin     # Binary Hash 快取 (HASH_CACHE_FILE)
-analysis_targets.json   # 排行榜快取 (TARGETS_CACHE)
+# analysis.bin          -> 無 PNG 黑名單 (LOG_FILE)
+# file_hash_cache.bin   -> Binary Hash 快取 (HASH_CACHE_FILE)
+# analysis_targets.json -> 排行榜快取 (TARGETS_CACHE)
+analysis.bin
+file_hash_cache.bin
+analysis_targets.json
