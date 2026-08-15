@@ -34,13 +34,18 @@ def format_mb_or_gb(mb_value):
     return f"{mb_value:.1f} MB"
 
 
+# 先把忽略清單正規化成小寫，讓比對大小寫無關
+# （config 裡不論寫 'Uncensored' 還 'uncensored'、'AI生成' 都能命中）
+_IGNORED_TAG_KEYS_LOWER = {k.lower() for k in IGNORED_TAG_KEYS}
+
+
 def extract_all_tags(filename):
-    """從檔名的 []【】()（） 括號中抓出標籤，並濾掉雜訊關鍵字。"""
+    """從檔名的 []【】()（） 括號中抓出標籤，並濾掉雜訊關鍵字（大小寫無關）。"""
     raw_tags = re.findall(r'[\[【\(\（]\s*([^\]】\)\）]+?)\s*[\]】\)\）]', filename)
     clean_tags = []
     for t in raw_tags:
         t_str = t.strip()
-        if t_str and t_str.lower() not in IGNORED_TAG_KEYS:
+        if t_str and t_str.lower() not in _IGNORED_TAG_KEYS_LOWER:
             clean_tags.append(t_str)
     return clean_tags
 
