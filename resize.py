@@ -144,6 +144,7 @@ def extract_archive_to_dir(archive_path, extract_dst):
       status: 'ok'         全部成功
               'partial'    整包可開，但有內容物解壓失敗（failed_members 有明細）
               'unopenable' 整個壓縮檔打不開（沒有內容物明細可言）
+              'no_tool'    缺少 7-Zip 而無法處理此格式（檔案本身可能完好）
     """
     ext = os.path.splitext(archive_path)[1].lower()
     err_msg = ""
@@ -165,6 +166,10 @@ def extract_archive_to_dir(archive_path, extract_dst):
         status, failed, zip_err = _extract_zip_per_member(archive_path, extract_dst)
         combined = " | ".join(x for x in (err_msg, zip_err) if x)
         return status, failed, combined
+
+    # 非 zip 格式只能靠 7-Zip；工具不存在時無法斷定檔案好壞，不可當成壞檔
+    if not SEVEN_ZIP_PATH:
+        return 'no_tool', [], f"未安裝 7-Zip，無法處理 {ext} 格式"
 
     # 非 zip 格式：用 7z 是否列得出成員，判斷是「整包打不開」還是「部分失敗」
     openable, members = _list_7z_members(archive_path)
@@ -382,6 +387,10 @@ def slim_single_archive(archive_path, pool, temp_work_base):
         start_ex = time.time()
         status, failed_members, err_reason = extract_archive_to_dir(archive_path, temp_dir)
         if status != 'ok':
+            # 工具缺失是環境問題而非檔案問題：保留原地，不搬進失敗區
+            if status == 'no_tool':
+                print(f"⏭️ 略過：{err_reason}，檔案保留原地不搬移 [{safe_name}] 喵！")
+                return
             if status == 'unopenable':
                 print(f"❌ 整個壓縮檔打不開或格式不受支援 [{safe_name}] 喵！")
             else:
@@ -501,6 +510,11 @@ def main():
     print("========================================")
     print(f"🐱 找到 {len(all_files)} 個壓縮包，啟動【短路徑破解 + 詳細除錯版】[resize.py]...")
     print(f"🚀 總核心數: {total_cpus} | 系統保留: 4 核心 | 轉檔 WorkPool: {MAX_WORKERS} Workers")
+    if not SEVEN_ZIP_PATH:
+        non_zip = sum(1 for f in all_files if f.suffix.lower() != '.zip')
+        print("⚠️ 未找到 7-Zip：.rar / .7z 無法處理，將『原地略過、不搬移』")
+        if non_zip:
+            print(f"   └─ 本次有 {non_zip} 個非 zip 壓縮包會被略過，裝好 7-Zip 後再跑即可")
     if JPEG_FIX_MODE == 'auto':
         mlo_state = '可用' if _mlo else '未安裝（A 無損將略過，B 僅用 PIL 重壓）'
         print(f"🖼️ JPG 修正模式: auto | mozjpeg 無損套件: {mlo_state}")
