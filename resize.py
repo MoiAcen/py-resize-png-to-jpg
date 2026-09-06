@@ -73,45 +73,164 @@ def safe_remove(file_path, retries=3, delay=1):
     return False
 
 
+def _list_7z_members(archive_path):
+    """用 7z l 列出成員名稱；回傳 (是否可開啟, 成員名稱 list)。"""
+    if not SEVEN_ZIP_PATH:
+        return False, []
+    try:
+        res = subprocess.run(
+            [SEVEN_ZIP_PATH, "l", "-slt", str(archive_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='ignore',
+        )
+        if res.returncode != 0:
+            return False, []
+        members = []
+        is_dir = False
+        current = None
+        for line in res.stdout.splitlines():
+            line = line.rstrip()
+            if line.startswith('Path = '):
+                current = line[7:]
+                is_dir = False
+            elif line.startswith('Attributes = '):
+                is_dir = 'D' in line[13:].upper().split()[0] if line[13:].strip() else False
+            elif line == '' and current:
+                if not is_dir:
+                    members.append(current)
+                current = None
+        if current and not is_dir:
+            members.append(current)
+        # 第一筆 Path 是壓縮檔自身，去掉
+        if members and os.path.basename(members[0]) == os.path.basename(str(archive_path)):
+            members = members[1:]
+        return True, members
+    except Exception:
+        return False, []
+
+
+def _extract_zip_per_member(archive_path, extract_dst):
+    """逐成員解壓 zip，精準取得失敗清單。
+
+    回傳 (status, failed_members, err_msg)
+    """
+    try:
+        zf = zipfile.ZipFile(archive_path, 'r')
+    except Exception as e:
+        return 'unopenable', [], f"zipfile 無法開啟壓縮檔: {type(e).__name__}: {e}"
+
+    failed = []
+    try:
+        with zf:
+            for item in zf.infolist():
+                if item.is_dir():
+                    continue
+                try:
+                    zf.extract(item, extract_dst)
+                except Exception as e:
+                    failed.append((item.filename, f"{type(e).__name__}: {e}"))
+    except Exception as e:
+        return 'unopenable', [], f"zipfile 讀取成員清單失敗: {type(e).__name__}: {e}"
+
+    if failed:
+        # 失敗數量已寫在說明檔標頭，這裡不重複
+        return 'partial', failed, ""
+    return 'ok', [], ""
+
+
 def extract_archive_to_dir(archive_path, extract_dst):
-    """雙重解壓：先試 7-Zip，失敗再退回 Python zipfile，並回傳錯誤詳情。"""
+    """解壓壓縮包，並區分「整包打不開」與「部分內容物失敗」。
+
+    回傳 (status, failed_members, err_msg)
+      status: 'ok'         全部成功
+              'partial'    整包可開，但有內容物解壓失敗（failed_members 有明細）
+              'unopenable' 整個壓縮檔打不開（沒有內容物明細可言）
+              'no_tool'    缺少 7-Zip 而無法處理此格式（檔案本身可能完好）
+    """
+    ext = os.path.splitext(archive_path)[1].lower()
     err_msg = ""
 
-    # 策略 1: 使用 7-Zip 解壓
+    # 策略 1: 7-Zip（速度快、格式支援廣）
     if SEVEN_ZIP_PATH:
         try:
             cmd = [SEVEN_ZIP_PATH, "x", str(archive_path), f"-o{extract_dst}", "-y"]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='ignore')
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, errors='ignore')
             if res.returncode == 0:
-                return True, ""
+                return 'ok', [], ""
             err_msg = f"7-Zip 解壓失敗 (Code {res.returncode}): {res.stderr.strip() or res.stdout.strip()}"
         except Exception as e:
             err_msg = f"呼叫 7-Zip 異常: {e}"
 
-    # 策略 2: 備用 Python zipfile
-    ext = os.path.splitext(archive_path)[1].lower()
+    # 策略 2: zip 交給 Python zipfile 逐成員處理，可取得精準失敗清單
     if ext == '.zip':
-        try:
-            with zipfile.ZipFile(archive_path, 'r') as zf:
-                zf.extractall(extract_dst)
-            return True, ""
-        except Exception as e:
-            err_msg += f" | zipfile 解壓失敗: {e}"
+        status, failed, zip_err = _extract_zip_per_member(archive_path, extract_dst)
+        combined = " | ".join(x for x in (err_msg, zip_err) if x)
+        return status, failed, combined
 
-    return False, err_msg
+    # 非 zip 格式只能靠 7-Zip；工具不存在時無法斷定檔案好壞，不可當成壞檔
+    if not SEVEN_ZIP_PATH:
+        return 'no_tool', [], f"未安裝 7-Zip，無法處理 {ext} 格式"
+
+    # 非 zip 格式：用 7z 是否列得出成員，判斷是「整包打不開」還是「部分失敗」
+    openable, members = _list_7z_members(archive_path)
+    if not openable:
+        return 'unopenable', [], err_msg or "壓縮檔無法開啟或格式不受支援"
+
+    # 可列出成員 → 屬部分失敗；用「清單 vs 實際落地」比對缺漏的成員
+    landed = set()
+    for root, _, files in os.walk(extract_dst):
+        for fn in files:
+            rel = os.path.relpath(os.path.join(root, fn), extract_dst)
+            landed.add(rel.replace('\\', '/'))
+    failed = [(m, "未成功解出（7-Zip 回報錯誤）")
+              for m in members if m.replace('\\', '/') not in landed]
+    if not failed:
+        failed = [("(無法逐一辨識)", "7-Zip 回報錯誤，但所有成員皆已落地，內容可能毀損")]
+    return 'partial', failed, err_msg
 
 
 def move_to_failed_dir(archive_path):
-    """把解壓失敗的壓縮包搬到 FAILED_DIR 保留待查（同名自動加序號）。"""
+    """把解壓失敗的壓縮包搬到 FAILED_DIR 保留待查（同名自動加序號）。
+
+    回傳實際搬移後的路徑（失敗時回傳 None），讓說明檔能以相同檔名配對。
+    """
     try:
         failed_base = Path(FAILED_DIR)
         failed_base.mkdir(parents=True, exist_ok=True)
         dst_path = get_safe_destination(failed_base / Path(archive_path).name)
         shutil.move(str(archive_path), str(dst_path))
-        print(f"   └─ 📦 已搬至失敗區: {clean_str(str(dst_path))}")
-        return True
+        print(f"   ├─ 📦 已搬至失敗區: {clean_str(str(dst_path))}")
+        return dst_path
     except Exception as e:
         print(f"   └─ ⚠️ 搬移到失敗區 [{FAILED_DIR}] 時出錯: {e}")
+        return None
+
+
+def write_failed_report(dst_path, failed_members, err_msg):
+    """在失敗區寫一份與壓縮包同名的 .txt，記錄哪些內容物解壓失敗。"""
+    report_path = Path(str(dst_path) + '.txt')
+    try:
+        lines = [
+            "解壓失敗內容物清單",
+            "=" * 60,
+            f"壓縮檔  : {clean_str(dst_path.name)}",
+            f"處理時間: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"失敗數量: {len(failed_members)} 個內容物",
+            "=" * 60,
+            "",
+        ]
+        for name, reason in failed_members:
+            lines.append(f"[失敗] {clean_str(name)}")
+            lines.append(f"       原因: {clean_str(reason)}")
+            lines.append("")
+        if err_msg:
+            lines += ["-" * 60, "原始錯誤詳情:", clean_str(err_msg), ""]
+
+        report_path.write_text("\n".join(lines), encoding='utf-8', errors='replace')
+        print(f"   └─ 📝 已寫出失敗清單: {clean_str(report_path.name)}")
+        return True
+    except Exception as e:
+        print(f"   └─ ⚠️ 寫出失敗清單時出錯: {e}")
         return False
 
 
@@ -266,12 +385,23 @@ def slim_single_archive(archive_path, pool, temp_work_base):
 
         # 1. 高速解壓
         start_ex = time.time()
-        success, err_reason = extract_archive_to_dir(archive_path, temp_dir)
-        if not success:
-            print(f"❌ 解壓失敗或格式不受支援 [{safe_name}] 喵！")
+        status, failed_members, err_reason = extract_archive_to_dir(archive_path, temp_dir)
+        if status != 'ok':
+            # 工具缺失是環境問題而非檔案問題：保留原地，不搬進失敗區
+            if status == 'no_tool':
+                print(f"⏭️ 略過：{err_reason}，檔案保留原地不搬移 [{safe_name}] 喵！")
+                return
+            if status == 'unopenable':
+                print(f"❌ 整個壓縮檔打不開或格式不受支援 [{safe_name}] 喵！")
+            else:
+                print(f"❌ 有 {len(failed_members)} 個內容物解壓失敗 [{safe_name}] 喵！")
             if err_reason:
                 print(f"   ├─ 🔍 錯誤詳情: {err_reason}")
-            move_to_failed_dir(archive_path)
+
+            dst_path = move_to_failed_dir(archive_path)
+            # 只有「整包可開、部分內容物壞掉」才寫說明檔；整包打不開就沒有明細可寫
+            if dst_path and status == 'partial':
+                write_failed_report(dst_path, failed_members, err_reason)
             return
 
         all_extracted_files = [f for f in temp_dir_path.glob("**/*") if f.is_file()]
@@ -380,6 +510,11 @@ def main():
     print("========================================")
     print(f"🐱 找到 {len(all_files)} 個壓縮包，啟動【短路徑破解 + 詳細除錯版】[resize.py]...")
     print(f"🚀 總核心數: {total_cpus} | 系統保留: 4 核心 | 轉檔 WorkPool: {MAX_WORKERS} Workers")
+    if not SEVEN_ZIP_PATH:
+        non_zip = sum(1 for f in all_files if f.suffix.lower() != '.zip')
+        print("⚠️ 未找到 7-Zip：.rar / .7z 無法處理，將『原地略過、不搬移』")
+        if non_zip:
+            print(f"   └─ 本次有 {non_zip} 個非 zip 壓縮包會被略過，裝好 7-Zip 後再跑即可")
     if JPEG_FIX_MODE == 'auto':
         mlo_state = '可用' if _mlo else '未安裝（A 無損將略過，B 僅用 PIL 重壓）'
         print(f"🖼️ JPG 修正模式: auto | mozjpeg 無損套件: {mlo_state}")
