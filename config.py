@@ -10,8 +10,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
 # ================= 資料夾路徑 =================
-SOURCE_DIR = r"U:\CG"        # 來源資料夾
-TARGET_DIR = r"U:\resize"    # 瘦身工作區
+SOURCE_DIR = r"U:\CG"                 # 來源資料夾
+TARGET_DIR = r"U:\resize"             # 瘦身工作區
+FAILED_DIR = r"U:\resize\_failed"     # 解壓失敗的壓縮包搬到這裡待查
 
 # ================= 快取 / 紀錄檔（絕對路徑）=================
 LOG_FILE        = BASE_DIR / "analysis.bin"            # 無 PNG 黑名單
