@@ -19,11 +19,11 @@ from pathlib import Path
 from PIL import Image
 
 from config import (
-    TARGET_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
+    TARGET_DIR, FAILED_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
     MAX_WORKERS, ARCHIVE_EXTENSIONS, JPEG_EXTENSIONS, JPEG_FIX_MODE,
     JPEG_TARGET_QUALITY, JPEG_TARGET_SUBSAMPLING,
 )
-from common_utils import clean_str, format_mb_or_gb, SEVEN_ZIP_PATH
+from common_utils import clean_str, format_mb_or_gb, SEVEN_ZIP_PATH, get_safe_destination
 from jpeg_inspector import inspect_jpeg, classify_jpeg
 
 # mozjpeg 無損最佳化（pip 套件，內建 mozjpeg，免外部 exe）；未安裝則 A 略過
@@ -99,6 +99,20 @@ def extract_archive_to_dir(archive_path, extract_dst):
             err_msg += f" | zipfile 解壓失敗: {e}"
 
     return False, err_msg
+
+
+def move_to_failed_dir(archive_path):
+    """把解壓失敗的壓縮包搬到 FAILED_DIR 保留待查（同名自動加序號）。"""
+    try:
+        failed_base = Path(FAILED_DIR)
+        failed_base.mkdir(parents=True, exist_ok=True)
+        dst_path = get_safe_destination(failed_base / Path(archive_path).name)
+        shutil.move(str(archive_path), str(dst_path))
+        print(f"   └─ 📦 已搬至失敗區: {clean_str(str(dst_path))}")
+        return True
+    except Exception as e:
+        print(f"   └─ ⚠️ 搬移到失敗區 [{FAILED_DIR}] 時出錯: {e}")
+        return False
 
 
 def convert_single_image_worker(args):
@@ -256,7 +270,8 @@ def slim_single_archive(archive_path, pool, temp_work_base):
         if not success:
             print(f"❌ 解壓失敗或格式不受支援 [{safe_name}] 喵！")
             if err_reason:
-                print(f"   └─ 🔍 錯誤詳情: {err_reason}")
+                print(f"   ├─ 🔍 錯誤詳情: {err_reason}")
+            move_to_failed_dir(archive_path)
             return
 
         all_extracted_files = [f for f in temp_dir_path.glob("**/*") if f.is_file()]
