@@ -21,15 +21,15 @@ from pathlib import Path
 from PIL import Image
 
 from config import (
-    TARGET_DIR, FAILED_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
+    TARGET_DIR, FAILED_DIR, DONE_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
     MAX_WORKERS, ARCHIVE_EXTENSIONS, JPEG_EXTENSIONS, JPEG_FIX_MODE,
     JPEG_TARGET_QUALITY, JPEG_TARGET_SUBSAMPLING,
     JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO, JPEG_CONTENT_SAMPLE_SIZE,
-    MIN_ARCHIVE_SAVING_RATIO, LOWGAIN_FLAG_FILE, SKIP_ALREADY_DONE_ARCHIVES,
+    MIN_ARCHIVE_SAVING_RATIO, SKIP_ALREADY_DONE_ARCHIVES,
 )
 from common_utils import (
     clean_str, format_mb_or_gb, SEVEN_ZIP_PATH, get_safe_destination, get_file_hash_key,
-    zip_has_work,
+    zip_has_work, settings_signature, load_lowgain_flags, save_lowgain_flags, flag_key,
 )
 from jpeg_inspector import inspect_jpeg, classify_jpeg
 
@@ -38,49 +38,6 @@ try:
     import mozjpeg_lossless_optimization as _mlo
 except Exception:
     _mlo = None
-
-
-def settings_signature():
-    """把會影響「能省多少」的設定編成簽章。
-
-    任一設定改變 → 舊標記自動失效重評，不必手動清，
-    免得又出現「調了門檻卻沒生效」的困惑。
-    """
-    return (f"q{QUALITY}|tq{JPEG_TARGET_QUALITY}|fq{JPEG_FLAT_QUALITY}"
-            f"|fr{JPEG_FLAT_COLOR_RATIO}|sub{JPEG_TARGET_SUBSAMPLING}"
-            f"|min{MIN_ARCHIVE_SAVING_RATIO}")
-
-
-def load_lowgain_flags():
-    """讀取「省太少而放棄」的標記；設定簽章不符的項目直接丟棄。"""
-    if not os.path.exists(LOWGAIN_FLAG_FILE):
-        return {}
-    try:
-        with open(LOWGAIN_FLAG_FILE, 'r', encoding='utf-8') as f:
-            raw = json.load(f)
-    except Exception:
-        return {}
-
-    sig = settings_signature()
-    kept = {k: v for k, v in raw.items() if v.get('sig') == sig}
-    dropped = len(raw) - len(kept)
-    if dropped:
-        print(f"♻️ 設定已變更，{dropped} 筆舊標記失效，這些壓縮包將重新評估喵！")
-    return kept
-
-
-def save_lowgain_flags(flags):
-    """把標記寫回磁碟（失敗時靜默略過，不影響主流程）。"""
-    try:
-        with open(LOWGAIN_FLAG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(flags, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"⚠️ 標記寫入失敗: {e}")
-
-
-def flag_key(archive_path):
-    """以「檔名+大小+時間」當標記 key：檔案一旦變動，標記自然失效。"""
-    return get_file_hash_key(Path(archive_path))
 
 
 def get_safe_output_path(target_zip_path, current_archive_path=None):
@@ -254,6 +211,37 @@ def move_to_failed_dir(archive_path):
     except Exception as e:
         print(f"   └─ ⚠️ 搬移到失敗區 [{FAILED_DIR}] 時出錯: {e}")
         return None
+
+
+def move_to_done_dir(final_path):
+    """把處理完成的壓縮包搬到 DONE_DIR，讓工作區只留下還沒處理的東西。
+
+    同名時沿用 get_safe_destination（加序號、永不覆蓋）。
+    搬移後補回修改時間，維持「時間與原檔一致」的承諾。
+    搬移失敗不視為錯誤——檔案已經處理好了，留在原地即可。
+    """
+    if not DONE_DIR:
+        return final_path
+    try:
+        src = Path(final_path)
+        done_base = Path(DONE_DIR)
+        if done_base.resolve() == src.parent.resolve():
+            return final_path          # 已經在完成區，不用搬
+
+        done_base.mkdir(parents=True, exist_ok=True)
+        st = src.stat()
+        dst = get_safe_destination(done_base / src.name)
+        shutil.move(str(src), str(dst))
+        try:
+            os.utime(dst, (st.st_atime, st.st_mtime))
+        except Exception:
+            pass
+        renamed = '' if dst.name == src.name else f"（同名已存在，改名為 {clean_str(dst.name)}）"
+        print(f"  📁 已搬至完成區: {clean_str(str(dst))}{renamed}")
+        return str(dst)
+    except Exception as e:
+        print(f"  ⚠️ 搬到完成區 [{DONE_DIR}] 失敗，檔案保留原地: {e}")
+        return final_path
 
 
 def write_failed_report(dst_path, failed_members, err_msg):
@@ -441,15 +429,28 @@ def process_jpegs_auto(jpg_files, pool):
 
     tasks = []
     diag = Counter()
+    qdist = Counter()        # 會被處理的來源品質分佈
+    qskip = Counter()        # 被跳過的品質分佈（看得出有沒有「還能再壓」的漏網之魚）
+    chroma444 = 0            # 其中有幾張是 4:4:4
+    first = None             # 第一張要處理的圖，當作具體範例
     for jf in jpg_files:
-        result = classify_jpeg(inspect_jpeg(jf))
+        report = inspect_jpeg(jf)
+        result = classify_jpeg(report)
         action = result['action']
         if not result['needs_fix'] or action == 'skip':
             diag['skip'] += 1
+            if report:
+                qskip[report.get('est_quality')] += 1
             continue
         # downscale 目前刻意不做 → 非重壓類一律走 A 無損
         route = 'B' if 'recompress' in action else 'A'
         diag[route] += 1
+        if report:
+            qdist[report.get('est_quality')] += 1
+            if report.get('subsampling') == '4:4:4':
+                chroma444 += 1
+            if first is None:
+                first = (jf.name, report, route)
         tasks.append((str(jf), route, JPEG_TARGET_SUBSAMPLING))
 
     if not tasks:
@@ -472,6 +473,20 @@ def process_jpegs_auto(jpg_files, pool):
         f"  🖼️ JPG 修正: A無損×{diag['A']} / B重壓×{diag['B']} / 跳過×{diag['skip']} "
         f"→ 實際變小並替換 {fixed} 張{split}"
     )
+
+    if first:
+        name, rep, route = first
+        prog = 'progressive' if rep.get('progressive') else 'baseline'
+        print(f"     ├─ 📷 首張 [{clean_str(name)}]: {rep['width']}x{rep['height']}, "
+              f"Q{rep.get('est_quality')}, {rep.get('subsampling')}, {prog} → 走 {route}")
+    if qdist:
+        top = ', '.join(f"Q{q}×{n}" for q, n in qdist.most_common(5))
+        extra = f"（其中 4:4:4 共 {chroma444} 張）" if chroma444 else ''
+        connector = '├─' if qskip else '└─'
+        print(f"     {connector} 📊 處理的來源品質: {top}{extra}")
+    if qskip:
+        top = ', '.join(f"Q{q}×{n}" for q, n in qskip.most_common(5))
+        print(f"     └─ 💤 跳過的品質分佈: {top}")
     return fixed
 
 
@@ -498,6 +513,7 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
     if SKIP_ALREADY_DONE_ARCHIVES and not recheck:
         if zip_has_work(Path(archive_path)) is False:
             print(f"⏭️ 抽樣判定整包已處理過，免解壓直接跳過 [{safe_name}] 喵！")
+            move_to_done_dir(archive_path)
             return
 
     # 使用短路徑暫存區，徹底解決 260 字元長度限制
@@ -540,6 +556,7 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
 
         if not png_files and jpg_fixed == 0:
             print(f"⏭️ 跳過：無可瘦身內容（PNG 或可修正 JPG）[{safe_name}] 喵！")
+            move_to_done_dir(archive_path)
             return
 
         # 2. 派工器分派 PNG 轉檔任務（若有）
@@ -588,10 +605,15 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
                   f"（低於門檻 {MIN_ARCHIVE_SAVING_RATIO * 100:.0f}%），放棄替換、保留原檔喵！")
             if os.path.exists(temp_output_zip):
                 safe_remove(temp_output_zip)
+            # 先搬再標記：標記的 key 是「檔名+大小+時間」，搬到完成區若因同名
+            # 被加了序號，就得改用搬移後的檔案重算，否則下一輪認不出來，
+            # 這包又會被分析器挑中、搬回來重跑一次。
+            done_path = move_to_done_dir(archive_path) or archive_path
             if key is not None and flags is not None:
-                flags[key] = {'name': os.path.basename(archive_path),
-                              'ratio': round(savings_ratio, 1),
-                              'sig': settings_signature()}
+                final_key = flag_key(done_path) or key
+                flags[final_key] = {'name': os.path.basename(done_path),
+                                    'ratio': round(savings_ratio, 1),
+                                    'sig': settings_signature()}
                 print("     └─ 🏷️ 已標記，之後不再重複嘗試（--recheck 可重評）")
             return
 
@@ -622,6 +644,8 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
             if os.path.exists(archive_path):
                 safe_remove(archive_path)
                 print(f"  🗑️ 已安全清理原始檔: {safe_name}")
+
+        move_to_done_dir(final_zip_path)
 
 
 def show_flags(flags):

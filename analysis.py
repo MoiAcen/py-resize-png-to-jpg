@@ -20,6 +20,7 @@ from common_utils import (
     load_processed_files, save_clean_file,
     load_hash_cache, save_hash_cache,
     get_archive_image_stats, stats_png_ratio, stats_large_jpg_ratio,
+    load_lowgain_flags, flag_key,
 )
 
 
@@ -55,6 +56,7 @@ def main():
 
     processed_files = load_processed_files()
     hash_cache = load_hash_cache()
+    lowgain_flags = load_lowgain_flags()
 
     print("========================================")
     print("⚡ 實體硬碟空間推演分析器 (Binary 二進制快取加速版) 啟動喵！")
@@ -84,6 +86,7 @@ def main():
     new_analyzed_count = 0
     jpg_problem_found_count = 0
     already_optimized_count = 0
+    lowgain_skipped_count = 0
 
     for file_path in all_files:
         if target_found_count >= MAX_TARGET_FILES:
@@ -93,6 +96,11 @@ def main():
         # 跳過黑名單與紀錄檔本身（以小寫檔名比對）
         if (file_path.name.lower() in processed_files
                 or file_path.name.lower() == LOG_FILE.name.lower()):
+            continue
+
+        # 試過但省太少的包：不列入統計、也不列入排行榜，免得反覆被搬來搬去
+        if flag_key(file_path) in lowgain_flags:
+            lowgain_skipped_count += 1
             continue
 
         tags = extract_all_tags(file_path.name)
@@ -177,6 +185,12 @@ def main():
 
     if not tag_stats:
         print("\n❌ 沒有找到任何符合條件的壓縮檔喵！")
+        # 全部都被略過時也要說清楚原因，不然看起來像是掃描壞掉了
+        if lowgain_skipped_count:
+            print(f"🏷️ 其中 {lowgain_skipped_count} 個是『試過但省太少』的標記包"
+                  f"（resize.py --recheck 可重評）")
+        if already_optimized_count:
+            print(f"✅ 其中 {already_optimized_count} 個是『內容已最佳化、再跑也省不了』的包")
         return
 
     sorted_tags = sorted(
@@ -191,6 +205,8 @@ def main():
 
     print("\n" + "=" * 65)
     print(f"📊 【硬碟釋放空間推演排行榜 Top {SHOW_TOP_N}】 (本次全新解析了 {new_analyzed_count} 個檔案)")
+    if lowgain_skipped_count:
+        print(f"🏷️ 已略過 {lowgain_skipped_count} 個『試過但省太少』的壓縮包（resize.py --recheck 可重評）")
     if already_optimized_count:
         print(f"✅ 已略過 {already_optimized_count} 個『內容已最佳化、再跑也省不了』的壓縮包")
     if jpg_problem_found_count:

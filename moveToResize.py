@@ -21,7 +21,7 @@ from common_utils import (
     clean_str, format_mb_or_gb, extract_all_tags, load_processed_files,
     save_clean_file, load_targets_cache, load_hash_cache, save_hash_cache,
     get_archive_image_stats, stats_png_ratio, stats_large_jpg_ratio,
-    is_slim_target, get_safe_destination,
+    is_slim_target, get_safe_destination, load_lowgain_flags, flag_key,
 )
 
 
@@ -53,6 +53,7 @@ def clear_all_caches():
 def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
     """現場針對關鍵字即時精算，回傳使用者選定要搬移的標籤清單。"""
     kw_clean = kw.strip().lower()
+    lowgain_flags = load_lowgain_flags()
 
     print(f"\n🔍 正在全域對 [{SOURCE_DIR}] 進行即時檔頭精算（關鍵字: 「{kw}」）...")
 
@@ -73,6 +74,9 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
     for file_path in all_files:
         if (file_path.name.lower() in processed_files
                 or file_path.name.lower() == LOG_FILE.name.lower()):
+            continue
+
+        if flag_key(file_path) in lowgain_flags:
             continue
 
         tags = extract_all_tags(file_path.name)
@@ -197,12 +201,18 @@ def move_files_for_pattern(src_path, dst_path, processed_files, hash_cache, sear
                            target_kw=None, selected_tags=None):
     """依標籤正則（或全域）搬移達標的壓縮包到目標資料夾。"""
     all_files = list_archives(src_path)
+    lowgain_flags = load_lowgain_flags()
 
     moved_count, skipped_count, total_moved_mb = 0, 0, 0
 
     for file_path in all_files:
         if (file_path.name.lower() == LOG_FILE.name.lower()
                 or file_path.name.lower() in processed_files):
+            skipped_count += 1
+            continue
+
+        # 試過但省太少的包：不再搬去 resize，免得來回空轉
+        if flag_key(file_path) in lowgain_flags:
             skipped_count += 1
             continue
 
