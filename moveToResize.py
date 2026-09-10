@@ -60,6 +60,7 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
 
     tag_stats = defaultdict(lambda: {
         'display_name': '',
+        'sample_file': '',
         'qualified_count': 0,
         'archive_total_mb': 0.0,
         'est_png_disk_mb': 0.0,
@@ -106,6 +107,8 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
             stats = tag_stats[tag_key]
             if not stats['display_name']:
                 stats['display_name'] = raw_tag
+            if not stats['sample_file']:
+                stats['sample_file'] = file_path.name
 
             png_disk_mb = archive_mb * png_ratio
             jpg_disk_mb = archive_mb * large_jpg_ratio if large_jpg_ratio >= JPEG_PROBLEM_RATIO else 0.0
@@ -143,6 +146,8 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
             f"PNG: {png_mb_str} | 過大JPG: {jpg_mb_str} | "
             f"預估可空出: ~{save_mb_str} (檔案總重 {total_mb_str})"
         )
+        if r['sample_file']:
+            print(f"        └─ 📄 {clean_str(r['sample_file'])}")
 
     print("-" * 75)
     print(" [A] 搬移上述分析到的【全部符合標籤】")
@@ -277,6 +282,8 @@ def print_menu(targets):
             jpg_str = format_mb_or_gb(t.get('jpg_mb', 0))
             save_str = format_mb_or_gb(t['est_saved_mb'])
             print(f" [{t['rank']}] [{tag_name}] ── PNG: {png_str} | 過大JPG: {jpg_str} | 預估可省 ~{save_str}")
+            if t.get('sample'):
+                print(f"        └─ 📄 {clean_str(t['sample'])}")
     else:
         print("💡 提醒：目前無排行榜快取 (不影響搜尋，可直接輸入 [F] 進行即時精算) 喵！")
 

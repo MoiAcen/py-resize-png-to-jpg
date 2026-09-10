@@ -45,6 +45,9 @@ JPEG_EXTENSIONS = ('.jpg', '.jpeg')
 # --- 分析階段（analysis.py）：靠檔案大小快速篩「問題包」候選 ---
 JPEG_LARGE_KB      = 1024   # 單張 JPG 超過此大小 (KB) 視為「可能過大」候選（排除縮圖/雜圖）
 JPEG_PROBLEM_RATIO = 0.30   # 過大 JPG 佔壓縮包內容比例達此值 → 視為值得瘦身的目標
+# 抽樣幾張最大的 JPG 來判斷「這包是否已經處理過」。抽到的每張都不需修正 →
+# 視為已最佳化，排行榜不再列入（避免處理完的包每次掃描又冒出來）。
+JPEG_OPTIMIZED_SAMPLE_COUNT = 3
 ESTIMATED_JPG_REDUCTION_RATE = 0.20   # 預估過大 JPG 重整後可省下的體積比例（保守估算，僅供排序）
 
 # --- resize 階段：逐檔讀 marker 判斷該不該修正 ---

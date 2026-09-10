@@ -64,6 +64,7 @@ def main():
 
     tag_stats = defaultdict(lambda: {
         'display_name': '',
+        'sample_file': '',        # 代表性檔名，讓數字型標籤看得出是什麼
         'total_files': 0,
         'qualified_files': 0,
         'est_png_disk_mb': 0.0,
@@ -82,6 +83,7 @@ def main():
     scanned_total_count = 0
     new_analyzed_count = 0
     jpg_problem_found_count = 0
+    already_optimized_count = 0
 
     for file_path in all_files:
         if target_found_count >= MAX_TARGET_FILES:
@@ -110,11 +112,17 @@ def main():
         is_success = stats_info['success']
         png_ratio = stats_png_ratio(stats_info)
         large_jpg_ratio = stats_large_jpg_ratio(stats_info)
-        is_jpg_problem = large_jpg_ratio >= JPEG_PROBLEM_RATIO
+        jpg_optimized = stats_info.get('jpg_optimized', False)
+        is_jpg_problem = large_jpg_ratio >= JPEG_PROBLEM_RATIO and not jpg_optimized
 
         # 只有「PNG 與過大 JPG 都沒有」才列入黑名單，避免 JPG 包被永久隱藏
         if is_success and png_ratio == 0 and stats_info['large_jpg_bytes'] == 0:
             save_clean_file(file_path.name)
+            continue
+
+        # 抽樣顯示 JPG 已最佳化、又沒有可轉的 PNG → 再跑也省不了，不列入排行榜
+        if is_success and png_ratio == 0 and jpg_optimized:
+            already_optimized_count += 1
             continue
 
         for raw_tag_name in tags:
@@ -122,6 +130,8 @@ def main():
             stats = tag_stats[tag_key]
             if not stats['display_name']:
                 stats['display_name'] = raw_tag_name
+            if not stats['sample_file']:
+                stats['sample_file'] = file_path.name
 
             stats['total_files'] += 1
             stats['archive_total_mb'] += archive_mb
@@ -181,6 +191,8 @@ def main():
 
     print("\n" + "=" * 65)
     print(f"📊 【硬碟釋放空間推演排行榜 Top {SHOW_TOP_N}】 (本次全新解析了 {new_analyzed_count} 個檔案)")
+    if already_optimized_count:
+        print(f"✅ 已略過 {already_optimized_count} 個『內容已最佳化、再跑也省不了』的壓縮包")
     if jpg_problem_found_count:
         print(f"🖼️ 另偵測到 {jpg_problem_found_count} 個『疑似過大 JPG』包（PNG 未達標但 JPG 過大，值得 resize 逐檔體檢）")
     print("=" * 65)
@@ -197,6 +209,8 @@ def main():
         png_connector = '├─' if has_jpg else '└─'
 
         print(f"\n🏆 Rank {rank}: [{safe_tag}]")
+        if data['sample_file']:
+            print(f"    ├─ 📄 代表檔案: {clean_str(data['sample_file'])}")
         print(f"    ├─ 💡 處理後預估能幫硬碟『直接空出』: ~{format_mb_or_gb(est_saved_mb)}")
         print(f"    ├─ 📦 標籤旗下壓縮檔實體總重: {format_mb_or_gb(archive_mb)} ({data['total_files']} 個檔案)")
         print(f"    {png_connector} 🔍 其中約有 {format_mb_or_gb(png_disk_mb)} 是由 PNG 構成的內容")
@@ -209,6 +223,7 @@ def main():
         targets_cache_data.append({
             'rank': rank,
             'tag': data['display_name'],
+            'sample': data['sample_file'],
             'png_mb': png_disk_mb,
             'jpg_mb': data['jpg_problem_disk_mb'],
             'est_saved_mb': est_saved_mb,
