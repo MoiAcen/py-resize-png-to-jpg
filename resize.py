@@ -441,15 +441,28 @@ def process_jpegs_auto(jpg_files, pool):
 
     tasks = []
     diag = Counter()
+    qdist = Counter()        # 會被處理的來源品質分佈
+    qskip = Counter()        # 被跳過的品質分佈（看得出有沒有「還能再壓」的漏網之魚）
+    chroma444 = 0            # 其中有幾張是 4:4:4
+    first = None             # 第一張要處理的圖，當作具體範例
     for jf in jpg_files:
-        result = classify_jpeg(inspect_jpeg(jf))
+        report = inspect_jpeg(jf)
+        result = classify_jpeg(report)
         action = result['action']
         if not result['needs_fix'] or action == 'skip':
             diag['skip'] += 1
+            if report:
+                qskip[report.get('est_quality')] += 1
             continue
         # downscale 目前刻意不做 → 非重壓類一律走 A 無損
         route = 'B' if 'recompress' in action else 'A'
         diag[route] += 1
+        if report:
+            qdist[report.get('est_quality')] += 1
+            if report.get('subsampling') == '4:4:4':
+                chroma444 += 1
+            if first is None:
+                first = (jf.name, report, route)
         tasks.append((str(jf), route, JPEG_TARGET_SUBSAMPLING))
 
     if not tasks:
@@ -472,6 +485,20 @@ def process_jpegs_auto(jpg_files, pool):
         f"  🖼️ JPG 修正: A無損×{diag['A']} / B重壓×{diag['B']} / 跳過×{diag['skip']} "
         f"→ 實際變小並替換 {fixed} 張{split}"
     )
+
+    if first:
+        name, rep, route = first
+        prog = 'progressive' if rep.get('progressive') else 'baseline'
+        print(f"     ├─ 📷 首張 [{clean_str(name)}]: {rep['width']}x{rep['height']}, "
+              f"Q{rep.get('est_quality')}, {rep.get('subsampling')}, {prog} → 走 {route}")
+    if qdist:
+        top = ', '.join(f"Q{q}×{n}" for q, n in qdist.most_common(5))
+        extra = f"（其中 4:4:4 共 {chroma444} 張）" if chroma444 else ''
+        connector = '├─' if qskip else '└─'
+        print(f"     {connector} 📊 處理的來源品質: {top}{extra}")
+    if qskip:
+        top = ', '.join(f"Q{q}×{n}" for q, n in qskip.most_common(5))
+        print(f"     └─ 💤 跳過的品質分佈: {top}")
     return fixed
 
 
