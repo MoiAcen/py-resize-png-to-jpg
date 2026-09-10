@@ -11,12 +11,15 @@ import re
 import shutil
 import subprocess
 import zipfile
+from pathlib import Path
 
 from config import (
     LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
     MIN_SINGLE_PNG_KB, POSSIBLE_7Z_PATHS, IGNORED_TAG_KEYS,
     JPEG_EXTENSIONS, JPEG_LARGE_KB, TARGET_PNG_RATIO, JPEG_PROBLEM_RATIO,
-    JPEG_OPTIMIZED_SAMPLE_COUNT,
+    JPEG_OPTIMIZED_SAMPLE_COUNT, LOWGAIN_FLAG_FILE,
+    QUALITY, JPEG_TARGET_QUALITY, JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO,
+    JPEG_TARGET_SUBSAMPLING, MIN_ARCHIVE_SAVING_RATIO,
 )
 
 
@@ -117,6 +120,51 @@ def load_targets_cache(cache_file=TARGETS_CACHE):
         except Exception as e:
             print(f"⚠️ 快取讀取失敗: {e}")
     return []
+
+
+# ================= 「效率不足」標記 =================
+def settings_signature():
+    """把會影響「能省多少」的設定編成簽章。
+
+    任一設定改變 → 舊標記自動失效重評，不必手動清，
+    免得又出現「調了門檻卻沒生效」的困惑。
+    """
+    return (f"q{QUALITY}|tq{JPEG_TARGET_QUALITY}|fq{JPEG_FLAT_QUALITY}"
+            f"|fr{JPEG_FLAT_COLOR_RATIO}|sub{JPEG_TARGET_SUBSAMPLING}"
+            f"|min{MIN_ARCHIVE_SAVING_RATIO}")
+
+
+def load_lowgain_flags():
+    """讀取「省太少而放棄」的標記；設定簽章不符的項目直接丟棄。"""
+    if not os.path.exists(LOWGAIN_FLAG_FILE):
+        return {}
+    try:
+        with open(LOWGAIN_FLAG_FILE, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+
+    sig = settings_signature()
+    kept = {k: v for k, v in raw.items() if v.get('sig') == sig}
+    dropped = len(raw) - len(kept)
+    if dropped:
+        print(f"♻️ 設定已變更，{dropped} 筆舊標記失效，這些壓縮包將重新評估喵！")
+    return kept
+
+
+def save_lowgain_flags(flags):
+    """把標記寫回磁碟（失敗時靜默略過，不影響主流程）。"""
+    try:
+        with open(LOWGAIN_FLAG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(flags, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 標記寫入失敗: {e}")
+
+
+def flag_key(archive_path):
+    """以「檔名+大小+時間」當標記 key：檔案一旦變動，標記自然失效。"""
+    return get_file_hash_key(Path(archive_path))
+
 
 
 # ================= 7-Zip 定位 =================

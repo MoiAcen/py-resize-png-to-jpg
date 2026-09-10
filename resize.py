@@ -25,11 +25,11 @@ from config import (
     MAX_WORKERS, ARCHIVE_EXTENSIONS, JPEG_EXTENSIONS, JPEG_FIX_MODE,
     JPEG_TARGET_QUALITY, JPEG_TARGET_SUBSAMPLING,
     JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO, JPEG_CONTENT_SAMPLE_SIZE,
-    MIN_ARCHIVE_SAVING_RATIO, LOWGAIN_FLAG_FILE, SKIP_ALREADY_DONE_ARCHIVES,
+    MIN_ARCHIVE_SAVING_RATIO, SKIP_ALREADY_DONE_ARCHIVES,
 )
 from common_utils import (
     clean_str, format_mb_or_gb, SEVEN_ZIP_PATH, get_safe_destination, get_file_hash_key,
-    zip_has_work,
+    zip_has_work, settings_signature, load_lowgain_flags, save_lowgain_flags, flag_key,
 )
 from jpeg_inspector import inspect_jpeg, classify_jpeg
 
@@ -38,49 +38,6 @@ try:
     import mozjpeg_lossless_optimization as _mlo
 except Exception:
     _mlo = None
-
-
-def settings_signature():
-    """把會影響「能省多少」的設定編成簽章。
-
-    任一設定改變 → 舊標記自動失效重評，不必手動清，
-    免得又出現「調了門檻卻沒生效」的困惑。
-    """
-    return (f"q{QUALITY}|tq{JPEG_TARGET_QUALITY}|fq{JPEG_FLAT_QUALITY}"
-            f"|fr{JPEG_FLAT_COLOR_RATIO}|sub{JPEG_TARGET_SUBSAMPLING}"
-            f"|min{MIN_ARCHIVE_SAVING_RATIO}")
-
-
-def load_lowgain_flags():
-    """讀取「省太少而放棄」的標記；設定簽章不符的項目直接丟棄。"""
-    if not os.path.exists(LOWGAIN_FLAG_FILE):
-        return {}
-    try:
-        with open(LOWGAIN_FLAG_FILE, 'r', encoding='utf-8') as f:
-            raw = json.load(f)
-    except Exception:
-        return {}
-
-    sig = settings_signature()
-    kept = {k: v for k, v in raw.items() if v.get('sig') == sig}
-    dropped = len(raw) - len(kept)
-    if dropped:
-        print(f"♻️ 設定已變更，{dropped} 筆舊標記失效，這些壓縮包將重新評估喵！")
-    return kept
-
-
-def save_lowgain_flags(flags):
-    """把標記寫回磁碟（失敗時靜默略過，不影響主流程）。"""
-    try:
-        with open(LOWGAIN_FLAG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(flags, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"⚠️ 標記寫入失敗: {e}")
-
-
-def flag_key(archive_path):
-    """以「檔名+大小+時間」當標記 key：檔案一旦變動，標記自然失效。"""
-    return get_file_hash_key(Path(archive_path))
 
 
 def get_safe_output_path(target_zip_path, current_archive_path=None):
@@ -556,6 +513,7 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
     if SKIP_ALREADY_DONE_ARCHIVES and not recheck:
         if zip_has_work(Path(archive_path)) is False:
             print(f"⏭️ 抽樣判定整包已處理過，免解壓直接跳過 [{safe_name}] 喵！")
+            move_to_done_dir(archive_path)
             return
 
     # 使用短路徑暫存區，徹底解決 260 字元長度限制
@@ -598,6 +556,7 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
 
         if not png_files and jpg_fixed == 0:
             print(f"⏭️ 跳過：無可瘦身內容（PNG 或可修正 JPG）[{safe_name}] 喵！")
+            move_to_done_dir(archive_path)
             return
 
         # 2. 派工器分派 PNG 轉檔任務（若有）
@@ -646,10 +605,15 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
                   f"（低於門檻 {MIN_ARCHIVE_SAVING_RATIO * 100:.0f}%），放棄替換、保留原檔喵！")
             if os.path.exists(temp_output_zip):
                 safe_remove(temp_output_zip)
+            # 先搬再標記：標記的 key 是「檔名+大小+時間」，搬到完成區若因同名
+            # 被加了序號，就得改用搬移後的檔案重算，否則下一輪認不出來，
+            # 這包又會被分析器挑中、搬回來重跑一次。
+            done_path = move_to_done_dir(archive_path) or archive_path
             if key is not None and flags is not None:
-                flags[key] = {'name': os.path.basename(archive_path),
-                              'ratio': round(savings_ratio, 1),
-                              'sig': settings_signature()}
+                final_key = flag_key(done_path) or key
+                flags[final_key] = {'name': os.path.basename(done_path),
+                                    'ratio': round(savings_ratio, 1),
+                                    'sig': settings_signature()}
                 print("     └─ 🏷️ 已標記，之後不再重複嘗試（--recheck 可重評）")
             return
 
