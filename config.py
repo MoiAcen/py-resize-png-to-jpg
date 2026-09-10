@@ -18,6 +18,7 @@ FAILED_DIR = r"U:\resize_failed"      # 解壓失敗的壓縮包搬到這裡待�
 LOG_FILE        = BASE_DIR / "analysis.bin"            # 無 PNG 黑名單
 TARGETS_CACHE   = BASE_DIR / "analysis_targets.json"   # 排行榜快取
 HASH_CACHE_FILE = BASE_DIR / "file_hash_cache.bin"     # Binary Hash 快取
+LOWGAIN_FLAG_FILE = BASE_DIR / "lowgain_skip.json"     # 「省太少而放棄」的標記，避免每次重跑空轉
 
 # ================= 腳本名稱（階段串接用）=================
 MOVE_SCRIPT_NAME   = "moveToResize.py"
