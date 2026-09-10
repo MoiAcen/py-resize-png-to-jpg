@@ -13,6 +13,10 @@ BASE_DIR = Path(__file__).resolve().parent
 SOURCE_DIR = r"U:\CG"                 # 來源資料夾
 TARGET_DIR = r"U:\resize"             # 瘦身工作區
 FAILED_DIR = r"U:\resize_failed"      # 解壓失敗的壓縮包搬到這裡待查
+# 處理成功的壓縮包搬到這裡，讓工作區只留下還沒處理完的東西。
+# 設成 None 或 "" 就維持原本行為（產出留在 TARGET_DIR 原地）。
+# 同名時沿用「自動加 (1)(2) 序號、永不覆蓋」的規則。
+DONE_DIR   = r"U:\resize_done"        # 處理完成的壓縮包搬到這裡
 
 # ================= 快取 / 紀錄檔（絕對路徑）=================
 LOG_FILE        = BASE_DIR / "analysis.bin"            # 無 PNG 黑名單

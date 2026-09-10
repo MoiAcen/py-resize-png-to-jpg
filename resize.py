@@ -21,7 +21,7 @@ from pathlib import Path
 from PIL import Image
 
 from config import (
-    TARGET_DIR, FAILED_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
+    TARGET_DIR, FAILED_DIR, DONE_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
     MAX_WORKERS, ARCHIVE_EXTENSIONS, JPEG_EXTENSIONS, JPEG_FIX_MODE,
     JPEG_TARGET_QUALITY, JPEG_TARGET_SUBSAMPLING,
     JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO, JPEG_CONTENT_SAMPLE_SIZE,
@@ -254,6 +254,37 @@ def move_to_failed_dir(archive_path):
     except Exception as e:
         print(f"   └─ ⚠️ 搬移到失敗區 [{FAILED_DIR}] 時出錯: {e}")
         return None
+
+
+def move_to_done_dir(final_path):
+    """把處理完成的壓縮包搬到 DONE_DIR，讓工作區只留下還沒處理的東西。
+
+    同名時沿用 get_safe_destination（加序號、永不覆蓋）。
+    搬移後補回修改時間，維持「時間與原檔一致」的承諾。
+    搬移失敗不視為錯誤——檔案已經處理好了，留在原地即可。
+    """
+    if not DONE_DIR:
+        return final_path
+    try:
+        src = Path(final_path)
+        done_base = Path(DONE_DIR)
+        if done_base.resolve() == src.parent.resolve():
+            return final_path          # 已經在完成區，不用搬
+
+        done_base.mkdir(parents=True, exist_ok=True)
+        st = src.stat()
+        dst = get_safe_destination(done_base / src.name)
+        shutil.move(str(src), str(dst))
+        try:
+            os.utime(dst, (st.st_atime, st.st_mtime))
+        except Exception:
+            pass
+        renamed = '' if dst.name == src.name else f"（同名已存在，改名為 {clean_str(dst.name)}）"
+        print(f"  📁 已搬至完成區: {clean_str(str(dst))}{renamed}")
+        return str(dst)
+    except Exception as e:
+        print(f"  ⚠️ 搬到完成區 [{DONE_DIR}] 失敗，檔案保留原地: {e}")
+        return final_path
 
 
 def write_failed_report(dst_path, failed_members, err_msg):
@@ -649,6 +680,8 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
             if os.path.exists(archive_path):
                 safe_remove(archive_path)
                 print(f"  🗑️ 已安全清理原始檔: {safe_name}")
+
+        move_to_done_dir(final_zip_path)
 
 
 def show_flags(flags):
