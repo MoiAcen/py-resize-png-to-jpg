@@ -6,7 +6,7 @@
 """
 from config import (
     JPEG_MAX_LONG_EDGE, JPEG_RECOMPRESS_MIN_QUALITY, JPEG_SKIP_BELOW_QUALITY,
-    JPEG_ENABLE_DOWNSCALE,
+    JPEG_ENABLE_DOWNSCALE, JPEG_TARGET_QUALITY,
 )
 
 # JPEG 規格書 Annex K.1 標準亮度量化表（自然順序 8x8）
@@ -164,7 +164,12 @@ def classify_jpeg(report):
     reasons = []
     q = report.get('est_quality')
     oversized = report['long_edge'] > JPEG_MAX_LONG_EDGE
-    overquality = q is not None and q >= JPEG_RECOMPRESS_MIN_QUALITY
+    # 已經在目標品質(含)以下的圖，重壓只會掉畫質、換不到好處，一律不再重壓。
+    # 這道條件讓「重壓 → 下輪又判定品質過高 → 再重壓」的迴圈結構上不可能發生，
+    # 不必依賴 JPEG_TARGET_QUALITY < JPEG_RECOMPRESS_MIN_QUALITY 這個隱性約定。
+    overquality = (q is not None
+                   and q >= JPEG_RECOMPRESS_MIN_QUALITY
+                   and q > JPEG_TARGET_QUALITY)
     low_quality = q is not None and q < JPEG_SKIP_BELOW_QUALITY
     full_chroma = report.get('subsampling') == '4:4:4'
     baseline = not report.get('progressive')
