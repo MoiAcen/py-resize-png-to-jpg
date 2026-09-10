@@ -170,6 +170,33 @@ def _sample_zip_jpgs_optimized(zf, jpg_entries):
     return checked > 0
 
 
+def zip_has_work(file_path):
+    """不解壓，只讀檔頭快速判斷這個 zip 還有沒有可瘦身的內容。
+
+    回傳 True=有事可做 / False=已經處理過 / None=無法判斷（呼叫端應保守繼續）。
+    解壓一個 250MB 的包要 2.6 秒，這裡只要約 2ms，差三個數量級。
+    """
+    if file_path.suffix.lower() != '.zip':
+        return None
+    try:
+        with zipfile.ZipFile(file_path, 'r') as zf:
+            jpg_entries = []
+            for item in zf.infolist():
+                if item.is_dir():
+                    continue
+                name = item.filename.lower()
+                if name.endswith('.png'):
+                    return True          # 有 PNG 就一定有得轉
+                if name.endswith(JPEG_EXTENSIONS):
+                    jpg_entries.append(item)
+
+            if not jpg_entries:
+                return False             # 既沒 PNG 也沒 JPG
+            return not _sample_zip_jpgs_optimized(zf, jpg_entries)
+    except Exception:
+        return None
+
+
 def get_archive_image_stats(file_path, hash_cache):
     """只讀壓縮檔的檔頭清單，統計 PNG / JPG 容量帳。
 

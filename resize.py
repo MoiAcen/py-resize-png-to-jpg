@@ -25,10 +25,11 @@ from config import (
     MAX_WORKERS, ARCHIVE_EXTENSIONS, JPEG_EXTENSIONS, JPEG_FIX_MODE,
     JPEG_TARGET_QUALITY, JPEG_TARGET_SUBSAMPLING,
     JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO, JPEG_CONTENT_SAMPLE_SIZE,
-    MIN_ARCHIVE_SAVING_RATIO, LOWGAIN_FLAG_FILE,
+    MIN_ARCHIVE_SAVING_RATIO, LOWGAIN_FLAG_FILE, SKIP_ALREADY_DONE_ARCHIVES,
 )
 from common_utils import (
     clean_str, format_mb_or_gb, SEVEN_ZIP_PATH, get_safe_destination, get_file_hash_key,
+    zip_has_work,
 )
 from jpeg_inspector import inspect_jpeg, classify_jpeg
 
@@ -491,6 +492,13 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
         print(f"⏭️ 已標記為效率不足{note}，跳過 [{safe_name}]；"
               f"想重評請加 --recheck 喵！")
         return
+
+    # 解壓前先抽樣判斷：整包都處理過就直接跳過，省掉整包解壓的 I/O
+    # （250MB 的包解壓要 2.6 秒，這裡只要約 2ms）
+    if SKIP_ALREADY_DONE_ARCHIVES and not recheck:
+        if zip_has_work(Path(archive_path)) is False:
+            print(f"⏭️ 抽樣判定整包已處理過，免解壓直接跳過 [{safe_name}] 喵！")
+            return
 
     # 使用短路徑暫存區，徹底解決 260 字元長度限制
     with tempfile.TemporaryDirectory(dir=temp_work_base) as temp_dir:
