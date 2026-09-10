@@ -221,6 +221,8 @@ __marimo__/
 # analysis.bin          -> 無 PNG 黑名單 (LOG_FILE)
 # file_hash_cache.bin   -> Binary Hash 快取 (HASH_CACHE_FILE)
 # analysis_targets.json -> 排行榜快取 (TARGETS_CACHE)
+# lowgain_skip.json     -> 省太少而放棄的標記 (LOWGAIN_FLAG_FILE)
 analysis.bin
 file_hash_cache.bin
 analysis_targets.json
+lowgain_skip.json

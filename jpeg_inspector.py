@@ -6,6 +6,7 @@
 """
 from config import (
     JPEG_MAX_LONG_EDGE, JPEG_RECOMPRESS_MIN_QUALITY, JPEG_SKIP_BELOW_QUALITY,
+    JPEG_ENABLE_DOWNSCALE, JPEG_TARGET_QUALITY,
 )
 
 # JPEG 規格書 Annex K.1 標準亮度量化表（自然順序 8x8）
@@ -163,7 +164,12 @@ def classify_jpeg(report):
     reasons = []
     q = report.get('est_quality')
     oversized = report['long_edge'] > JPEG_MAX_LONG_EDGE
-    overquality = q is not None and q >= JPEG_RECOMPRESS_MIN_QUALITY
+    # 已經在目標品質(含)以下的圖，重壓只會掉畫質、換不到好處，一律不再重壓。
+    # 這道條件讓「重壓 → 下輪又判定品質過高 → 再重壓」的迴圈結構上不可能發生，
+    # 不必依賴 JPEG_TARGET_QUALITY < JPEG_RECOMPRESS_MIN_QUALITY 這個隱性約定。
+    overquality = (q is not None
+                   and q >= JPEG_RECOMPRESS_MIN_QUALITY
+                   and q > JPEG_TARGET_QUALITY)
     low_quality = q is not None and q < JPEG_SKIP_BELOW_QUALITY
     full_chroma = report.get('subsampling') == '4:4:4'
     baseline = not report.get('progressive')
@@ -182,9 +188,13 @@ def classify_jpeg(report):
     if baseline:
         reasons.append('baseline(可轉progressive)')
 
-    if oversized and (overquality or full_chroma):
+    # 縮解析度關閉時，「解析度過大」只保留在 reasons 當資訊，不參與動作判定；
+    # 否則已最佳化但尺寸本來就大的圖會每輪都被判定需修正、重複空跑。
+    scale_fix = oversized and JPEG_ENABLE_DOWNSCALE
+
+    if scale_fix and (overquality or full_chroma):
         action = 'downscale+recompress'
-    elif oversized:
+    elif scale_fix:
         action = 'downscale'
     elif overquality or full_chroma:
         action = 'recompress'

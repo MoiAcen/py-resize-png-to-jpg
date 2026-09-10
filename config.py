@@ -18,6 +18,7 @@ FAILED_DIR = r"U:\resize_failed"      # 解壓失敗的壓縮包搬到這裡待�
 LOG_FILE        = BASE_DIR / "analysis.bin"            # 無 PNG 黑名單
 TARGETS_CACHE   = BASE_DIR / "analysis_targets.json"   # 排行榜快取
 HASH_CACHE_FILE = BASE_DIR / "file_hash_cache.bin"     # Binary Hash 快取
+LOWGAIN_FLAG_FILE = BASE_DIR / "lowgain_skip.json"     # 「省太少而放棄」的標記，避免每次重跑空轉
 
 # ================= 腳本名稱（階段串接用）=================
 MOVE_SCRIPT_NAME   = "moveToResize.py"
@@ -45,10 +46,16 @@ JPEG_EXTENSIONS = ('.jpg', '.jpeg')
 # --- 分析階段（analysis.py）：靠檔案大小快速篩「問題包」候選 ---
 JPEG_LARGE_KB      = 1024   # 單張 JPG 超過此大小 (KB) 視為「可能過大」候選（排除縮圖/雜圖）
 JPEG_PROBLEM_RATIO = 0.30   # 過大 JPG 佔壓縮包內容比例達此值 → 視為值得瘦身的目標
+# 抽樣幾張最大的 JPG 來判斷「這包是否已經處理過」。抽到的每張都不需修正 →
+# 視為已最佳化，排行榜不再列入（避免處理完的包每次掃描又冒出來）。
+JPEG_OPTIMIZED_SAMPLE_COUNT = 3
 ESTIMATED_JPG_REDUCTION_RATE = 0.20   # 預估過大 JPG 重整後可省下的體積比例（保守估算，僅供排序）
 
 # --- resize 階段：逐檔讀 marker 判斷該不該修正 ---
-JPEG_MAX_LONG_EDGE          = 4000  # 長邊超過此像素 → 標記解析度過大（僅提示，暫不縮圖）
+JPEG_MAX_LONG_EDGE          = 4000  # 長邊超過此像素 → 標記解析度過大
+# 是否允許縮解析度。預設關閉：關閉時「解析度過大」只當資訊提示、不觸發修正，
+# 避免「已最佳化但尺寸本來就大」的圖每輪被重複丟去處理。
+JPEG_ENABLE_DOWNSCALE       = False
 JPEG_RECOMPRESS_MIN_QUALITY = 95    # 估算品質 >= 此值才建議重壓
 JPEG_SKIP_BELOW_QUALITY     = 85    # 估算品質 < 此值 → 跳過以保護畫質
 
@@ -60,8 +67,28 @@ JPEG_SKIP_BELOW_QUALITY     = 85    # 估算品質 < 此值 → 跳過以保護�
 #   'off'    = 完全不做 JPG 體檢
 # （A/B 皆用 pip 套件 mozjpeg-lossless-optimization，免裝外部 exe）
 JPEG_FIX_MODE           = 'auto'
-JPEG_TARGET_QUALITY     = 92   # auto 模式 B（重壓）的目標品質
+JPEG_TARGET_QUALITY     = 92   # B（重壓）對「寫實/照片類」內容的目標品質
 JPEG_TARGET_SUBSAMPLING = 2    # B 重壓的色度抽樣：2 = 4:2:0（省空間、肉眼幾乎無感）
+
+# --- 依內容分流：平塗（賽璐璐風）可以壓得更兇，寫實紋理則保守 ---
+# 判斷指標是「顏色數佔比」：把圖以 NEAREST 取樣成小圖後，相異顏色數 / 總像素。
+# 實測分離度很大——真實照片 36~74%，平塗類 0~9%，中間有約 27 個百分點的空隙。
+# 低於門檻視為平塗 → 用 JPEG_FLAT_QUALITY；否則用 JPEG_TARGET_QUALITY。
+# 門檻預設偏保守（偏向判成寫實），寧可少省一點也不要壓壞細節多的圖。
+# 想校準成自己收藏的實際分佈，用 quality_test.py 看每張圖的實測值。
+JPEG_FLAT_QUALITY       = 80    # 平塗內容的目標品質；設成與 JPEG_TARGET_QUALITY 相同即等於關閉分流
+JPEG_FLAT_COLOR_RATIO   = 0.15  # 顏色數佔比低於此值 → 判定為平塗
+JPEG_CONTENT_SAMPLE_SIZE = 160  # 判定用的取樣邊長（越大越準也越慢；160 約 5ms/張）
+
+# --- 整包驗收：省太少就整包放棄，保留原檔 ---
+# 重壓一定有畫質代價，若整包只省下個位數百分比，等於付出代價卻換不到空間，
+# 不如原封不動。設 0 表示不啟用這道檢查。
+MIN_ARCHIVE_SAVING_RATIO = 0.10   # 整包縮減低於 10% → 放棄替換
+
+# 解壓前先抽樣判斷整包是否已處理過，是就直接跳過，省下整包解壓的 I/O。
+# 判斷方式與 analysis 相同（抽樣最大的幾張 JPG 看還需不需要修正）。
+# 關掉的話每個已處理過的包仍會被完整解壓一次才發現沒事做。
+SKIP_ALREADY_DONE_ARCHIVES = True
 
 # ================= 共用常數 =================
 # 支援掃描 / 處理的壓縮格式（副檔名皆為小寫）

@@ -4,7 +4,9 @@
 以「檔案數量吻合」為驗收條件，通過才替換原檔並繼承修改時間喵！
 （多核並行；使用短路徑暫存區規避 Windows 260 字元路徑限制。）
 """
+import argparse
 import io
+import json
 import os
 import shutil
 import stat
@@ -22,8 +24,13 @@ from config import (
     TARGET_DIR, FAILED_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
     MAX_WORKERS, ARCHIVE_EXTENSIONS, JPEG_EXTENSIONS, JPEG_FIX_MODE,
     JPEG_TARGET_QUALITY, JPEG_TARGET_SUBSAMPLING,
+    JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO, JPEG_CONTENT_SAMPLE_SIZE,
+    MIN_ARCHIVE_SAVING_RATIO, LOWGAIN_FLAG_FILE, SKIP_ALREADY_DONE_ARCHIVES,
 )
-from common_utils import clean_str, format_mb_or_gb, SEVEN_ZIP_PATH, get_safe_destination
+from common_utils import (
+    clean_str, format_mb_or_gb, SEVEN_ZIP_PATH, get_safe_destination, get_file_hash_key,
+    zip_has_work,
+)
 from jpeg_inspector import inspect_jpeg, classify_jpeg
 
 # mozjpeg 無損最佳化（pip 套件，內建 mozjpeg，免外部 exe）；未安裝則 A 略過
@@ -31,6 +38,49 @@ try:
     import mozjpeg_lossless_optimization as _mlo
 except Exception:
     _mlo = None
+
+
+def settings_signature():
+    """把會影響「能省多少」的設定編成簽章。
+
+    任一設定改變 → 舊標記自動失效重評，不必手動清，
+    免得又出現「調了門檻卻沒生效」的困惑。
+    """
+    return (f"q{QUALITY}|tq{JPEG_TARGET_QUALITY}|fq{JPEG_FLAT_QUALITY}"
+            f"|fr{JPEG_FLAT_COLOR_RATIO}|sub{JPEG_TARGET_SUBSAMPLING}"
+            f"|min{MIN_ARCHIVE_SAVING_RATIO}")
+
+
+def load_lowgain_flags():
+    """讀取「省太少而放棄」的標記；設定簽章不符的項目直接丟棄。"""
+    if not os.path.exists(LOWGAIN_FLAG_FILE):
+        return {}
+    try:
+        with open(LOWGAIN_FLAG_FILE, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+
+    sig = settings_signature()
+    kept = {k: v for k, v in raw.items() if v.get('sig') == sig}
+    dropped = len(raw) - len(kept)
+    if dropped:
+        print(f"♻️ 設定已變更，{dropped} 筆舊標記失效，這些壓縮包將重新評估喵！")
+    return kept
+
+
+def save_lowgain_flags(flags):
+    """把標記寫回磁碟（失敗時靜默略過，不影響主流程）。"""
+    try:
+        with open(LOWGAIN_FLAG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(flags, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 標記寫入失敗: {e}")
+
+
+def flag_key(archive_path):
+    """以「檔名+大小+時間」當標記 key：檔案一旦變動，標記自然失效。"""
+    return get_file_hash_key(Path(archive_path))
 
 
 def get_safe_output_path(target_zip_path, current_archive_path=None):
@@ -305,27 +355,68 @@ def _optimize_lossless(jpeg_bytes):
         return None
 
 
-def _recompress_bytes(img_path, quality, subsampling):
-    """B：以目標品質/抽樣重新編碼，再接一次無損擠壓，回傳新位元組。"""
-    with Image.open(img_path) as im:
-        if im.mode != 'RGB':
-            im = im.convert('RGB')
-        buf = io.BytesIO()
-        im.save(buf, format='JPEG', quality=quality, subsampling=subsampling,
-                optimize=True, progressive=True)
+def color_ratio(im, size=JPEG_CONTENT_SAMPLE_SIZE):
+    """相異顏色數 / 總像素，用來分辨平塗與寫實內容。
+
+    以 NEAREST 取樣成小圖再數顏色——NEAREST 不會內插出新顏色，
+    所以平塗的「顏色少」這個特性得以保留。實測真實照片 36~74%、
+    平塗類 0~9%，中間空隙很大。約 5ms/張，相對轉檔成本可忽略。
+    """
+    w, h = im.size
+    side = min(w, h)
+    box = ((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2)
+    small = im.resize((size, size), Image.NEAREST, box=box)
+    colors = small.getcolors(size * size) or []
+    return len(colors) / float(size * size)
+
+
+def pick_quality_for(im):
+    """依內容挑目標品質，回傳 (品質, 顏色數佔比, 類型標籤)。"""
+    ratio = color_ratio(im)
+    if ratio < JPEG_FLAT_COLOR_RATIO:
+        return JPEG_FLAT_QUALITY, ratio, 'flat'
+    return JPEG_TARGET_QUALITY, ratio, 'photo'
+
+
+def _encode(im, quality, subsampling):
+    """以指定品質/抽樣編碼，再接一次無損擠壓，回傳較小的那份。"""
+    buf = io.BytesIO()
+    im.save(buf, format='JPEG', quality=quality, subsampling=subsampling,
+            optimize=True, progressive=True)
     out = buf.getvalue()
     squeezed = _optimize_lossless(out)
     return squeezed if (squeezed and len(squeezed) < len(out)) else out
 
 
+def _recompress_bytes(img_path, quality, subsampling):
+    """B：以指定品質重壓，回傳新位元組。"""
+    with Image.open(img_path) as im:
+        if im.mode != 'RGB':
+            im = im.convert('RGB')
+        return _encode(im, quality, subsampling)
+
+
+def _recompress_auto(img_path, subsampling):
+    """B：依內容自動挑品質後重壓，回傳 (位元組, 品質, 類型)。"""
+    with Image.open(img_path) as im:
+        if im.mode != 'RGB':
+            im = im.convert('RGB')
+        quality, _ratio, kind = pick_quality_for(im)
+        return _encode(im, quality, subsampling), quality, kind
+
+
 def jpeg_fix_worker(args):
-    """Worker：依路由對單張 JPG 做 A/B 處理，僅在變小時替換並繼承時間。"""
-    img_path_str, route, quality, subsampling = args
+    """Worker：依路由對單張 JPG 做 A/B 處理，僅在變小時替換並繼承時間。
+
+    回傳 (是否替換, 內容類型)；類型只有走 B 時才有值，用來回報分流統計。
+    """
+    img_path_str, route, subsampling = args
     img_path = Path(img_path_str)
+    kind = None
     try:
         orig_stat = img_path.stat()
         if route == 'B':
-            new_bytes = _recompress_bytes(img_path, quality, subsampling)
+            new_bytes, _q, kind = _recompress_auto(img_path, subsampling)
         else:   # A 無損
             with open(img_path, 'rb') as f:
                 new_bytes = _optimize_lossless(f.read())
@@ -337,10 +428,10 @@ def jpeg_fix_worker(args):
                 os.utime(img_path, (orig_stat.st_atime, orig_stat.st_mtime))
             except Exception:
                 pass
-            return True
-        return False
+            return True, kind
+        return False, kind
     except Exception:
-        return False
+        return False, kind
 
 
 def process_jpegs_auto(jpg_files, pool):
@@ -359,25 +450,55 @@ def process_jpegs_auto(jpg_files, pool):
         # downscale 目前刻意不做 → 非重壓類一律走 A 無損
         route = 'B' if 'recompress' in action else 'A'
         diag[route] += 1
-        tasks.append((str(jf), route, JPEG_TARGET_QUALITY, JPEG_TARGET_SUBSAMPLING))
+        tasks.append((str(jf), route, JPEG_TARGET_SUBSAMPLING))
 
     if not tasks:
         return 0
 
     futures = [pool.submit(jpeg_fix_worker, t) for t in tasks]
-    fixed = sum(1 for f in as_completed(futures) if f.result())
+    fixed = 0
+    for f in as_completed(futures):
+        changed, kind = f.result()
+        if changed:
+            fixed += 1
+        if kind:
+            diag[kind] += 1
+
+    split = ''
+    if diag['flat'] or diag['photo']:
+        split = (f" (B 依內容分流: 平塗Q{JPEG_FLAT_QUALITY}×{diag['flat']} / "
+                 f"寫實Q{JPEG_TARGET_QUALITY}×{diag['photo']})")
     print(
         f"  🖼️ JPG 修正: A無損×{diag['A']} / B重壓×{diag['B']} / 跳過×{diag['skip']} "
-        f"→ 實際變小並替換 {fixed} 張"
+        f"→ 實際變小並替換 {fixed} 張{split}"
     )
     return fixed
 
 
-def slim_single_archive(archive_path, pool, temp_work_base):
-    """處理單一壓縮包：解壓 → 轉檔 → 重打包 → 驗收替換。"""
+def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=False):
+    """處理單一壓縮包：解壓 → 轉檔 → 重打包 → 驗收替換。
+
+    flags 為「省太少而放棄」的標記表；已標記者直接跳過，不做任何解壓，
+    除非 recheck=True 要求重新評估。
+    """
     safe_name = clean_str(os.path.basename(archive_path))
     orig_stat = os.stat(archive_path)
     orig_total_bytes = orig_stat.st_size
+
+    key = flag_key(archive_path) if flags is not None else None
+    if key and not recheck and key in flags:
+        prev = flags[key].get('ratio')
+        note = f"（上次只省 {prev:.1f}%）" if isinstance(prev, (int, float)) else ""
+        print(f"⏭️ 已標記為效率不足{note}，跳過 [{safe_name}]；"
+              f"想重評請加 --recheck 喵！")
+        return
+
+    # 解壓前先抽樣判斷：整包都處理過就直接跳過，省掉整包解壓的 I/O
+    # （250MB 的包解壓要 2.6 秒，這裡只要約 2ms）
+    if SKIP_ALREADY_DONE_ARCHIVES and not recheck:
+        if zip_has_work(Path(archive_path)) is False:
+            print(f"⏭️ 抽樣判定整包已處理過，免解壓直接跳過 [{safe_name}] 喵！")
+            return
 
     # 使用短路徑暫存區，徹底解決 260 字元長度限制
     with tempfile.TemporaryDirectory(dir=temp_work_base) as temp_dir:
@@ -461,6 +582,23 @@ def slim_single_archive(archive_path, pool, temp_work_base):
                 safe_remove(temp_output_zip)
             return
 
+        # 省太少就整包放棄：重壓的畫質代價已經付了，換不到空間就不值得替換
+        if MIN_ARCHIVE_SAVING_RATIO > 0 and savings_ratio < MIN_ARCHIVE_SAVING_RATIO * 100:
+            print(f"  ⏭️ 效率不足：只省下 {savings_ratio:.1f}%"
+                  f"（低於門檻 {MIN_ARCHIVE_SAVING_RATIO * 100:.0f}%），放棄替換、保留原檔喵！")
+            if os.path.exists(temp_output_zip):
+                safe_remove(temp_output_zip)
+            if key is not None and flags is not None:
+                flags[key] = {'name': os.path.basename(archive_path),
+                              'ratio': round(savings_ratio, 1),
+                              'sig': settings_signature()}
+                print("     └─ 🏷️ 已標記，之後不再重複嘗試（--recheck 可重評）")
+            return
+
+        # 這次成功處理了，若先前被標記過就把標記解除
+        if key is not None and flags is not None:
+            flags.pop(key, None)
+
         print("  ✅ 驗收通過：數量吻合喵！")
         print(
             f"  🚀 瘦身成效: {format_mb_or_gb(orig_total_bytes / (1024 * 1024))} -> "
@@ -486,7 +624,40 @@ def slim_single_archive(archive_path, pool, temp_work_base):
                 print(f"  🗑️ 已安全清理原始檔: {safe_name}")
 
 
+def show_flags(flags):
+    """列出目前被標記為效率不足的壓縮包。"""
+    if not flags:
+        print("💡 目前沒有任何『效率不足』標記喵！")
+        return
+    print(f"🏷️ 目前有 {len(flags)} 個壓縮包被標記為效率不足：")
+    print("-" * 65)
+    for v in sorted(flags.values(), key=lambda x: x.get('ratio', 0)):
+        print(f"  只省 {v.get('ratio', 0):>5.1f}%   {clean_str(v.get('name', '?'))}")
+    print("-" * 65)
+    print("💡 加 --recheck 可忽略標記重新評估；--clear-flags 可清空標記")
+
+
 def main():
+    parser = argparse.ArgumentParser(description='壓縮包瘦身工具')
+    parser.add_argument('--recheck', action='store_true',
+                        help='忽略「效率不足」標記，重新評估所有壓縮包')
+    parser.add_argument('--list-flags', action='store_true',
+                        help='列出目前被標記為效率不足的壓縮包後結束')
+    parser.add_argument('--clear-flags', action='store_true',
+                        help='清空所有「效率不足」標記後結束')
+    args = parser.parse_args()
+
+    flags = load_lowgain_flags()
+
+    if args.list_flags:
+        show_flags(flags)
+        return
+    if args.clear_flags:
+        n = len(flags)
+        save_lowgain_flags({})
+        print(f"🧹 已清空 {n} 筆『效率不足』標記，下次執行會全部重新評估喵！")
+        return
+
     target_path = Path(TARGET_DIR).resolve()
     if not target_path.exists():
         print(f"❌ 錯誤：目標目錄 [{TARGET_DIR}] 不存在喵！")
@@ -520,6 +691,10 @@ def main():
         print(f"🖼️ JPG 修正模式: auto | mozjpeg 無損套件: {mlo_state}")
     elif JPEG_FIX_MODE == 'report':
         print("🖼️ JPG 修正模式: report（只體檢、不改檔）")
+    if args.recheck:
+        print(f"♻️ --recheck：忽略 {len(flags)} 筆效率不足標記，全部重新評估")
+    elif flags:
+        print(f"🏷️ 已標記效率不足: {len(flags)} 筆（會直接跳過；--recheck 可重評）")
     print("========================================\n")
 
     try:
@@ -527,15 +702,19 @@ def main():
             for index, file_path in enumerate(all_files, start=1):
                 safe_name = clean_str(file_path.name)
                 print(f"▶ [{index}/{len(all_files)}] 正在處理: {safe_name}")
-                slim_single_archive(str(file_path), pool, temp_work_base)
+                slim_single_archive(str(file_path), pool, temp_work_base,
+                                    flags=flags, recheck=args.recheck)
                 print("-" * 50)
     finally:
         # 任務結束後順手清理短路徑暫存資料夾
         if temp_work_base.exists():
             shutil.rmtree(temp_work_base, ignore_errors=True)
+        save_lowgain_flags(flags)
 
     print("\n========================================")
     print("🎉 U:\\resize 下的所有壓縮包已完成極速轉檔喵！(ฅ'ω'ฅ)")
+    if flags:
+        print(f"🏷️ 目前累計 {len(flags)} 筆效率不足標記（--list-flags 可查看）")
     print("========================================")
 
 

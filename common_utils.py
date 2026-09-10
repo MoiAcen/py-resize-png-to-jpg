@@ -16,6 +16,7 @@ from config import (
     LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
     MIN_SINGLE_PNG_KB, POSSIBLE_7Z_PATHS, IGNORED_TAG_KEYS,
     JPEG_EXTENSIONS, JPEG_LARGE_KB, TARGET_PNG_RATIO, JPEG_PROBLEM_RATIO,
+    JPEG_OPTIMIZED_SAMPLE_COUNT,
 )
 
 
@@ -134,7 +135,66 @@ SEVEN_ZIP_PATH = find_7z()
 # 快取簽章：把「格式版本 + 會影響統計結果的門檻」一起編進 key。
 # 任一門檻改變（例如調整 JPEG_LARGE_KB / MIN_SINGLE_PNG_KB）時，舊快取自動
 # 失效重算，不需手動清快取。
-_STATS_CACHE_VERSION = f"3|png{MIN_SINGLE_PNG_KB}|jpg{JPEG_LARGE_KB}"
+_STATS_CACHE_VERSION = f"4|png{MIN_SINGLE_PNG_KB}|jpg{JPEG_LARGE_KB}|s{JPEG_OPTIMIZED_SAMPLE_COUNT}"
+
+
+def _sample_zip_jpgs_optimized(zf, jpg_entries):
+    """抽樣 zip 內最大的幾張 JPG，判斷是否『已經最佳化、再處理也省不了』。
+
+    只讀每張圖的檔頭（不解出整張圖），交給 jpeg_inspector 判定。
+    回傳 True 代表抽樣到的每一張都不需要修正。
+    無法判定（讀不到、沒有可抽樣的圖）時回傳 False，採保守作法。
+    """
+    if not jpg_entries:
+        return False
+
+    # 延遲匯入避免模組循環相依（jpeg_inspector 只依賴 config）
+    from jpeg_inspector import inspect_jpeg_stream, classify_jpeg
+
+    picked = sorted(jpg_entries, key=lambda it: it.file_size, reverse=True)
+    picked = picked[:max(1, JPEG_OPTIMIZED_SAMPLE_COUNT)]
+
+    checked = 0
+    for item in picked:
+        try:
+            with zf.open(item, 'r') as fp:
+                report = inspect_jpeg_stream(fp)
+        except Exception:
+            return False
+        if not report:
+            return False
+        if classify_jpeg(report)['needs_fix']:
+            return False
+        checked += 1
+
+    return checked > 0
+
+
+def zip_has_work(file_path):
+    """不解壓，只讀檔頭快速判斷這個 zip 還有沒有可瘦身的內容。
+
+    回傳 True=有事可做 / False=已經處理過 / None=無法判斷（呼叫端應保守繼續）。
+    解壓一個 250MB 的包要 2.6 秒，這裡只要約 2ms，差三個數量級。
+    """
+    if file_path.suffix.lower() != '.zip':
+        return None
+    try:
+        with zipfile.ZipFile(file_path, 'r') as zf:
+            jpg_entries = []
+            for item in zf.infolist():
+                if item.is_dir():
+                    continue
+                name = item.filename.lower()
+                if name.endswith('.png'):
+                    return True          # 有 PNG 就一定有得轉
+                if name.endswith(JPEG_EXTENSIONS):
+                    jpg_entries.append(item)
+
+            if not jpg_entries:
+                return False             # 既沒 PNG 也沒 JPG
+            return not _sample_zip_jpgs_optimized(zf, jpg_entries)
+    except Exception:
+        return None
 
 
 def get_archive_image_stats(file_path, hash_cache):
@@ -170,13 +230,21 @@ def get_archive_image_stats(file_path, hash_cache):
             if size >= large_jpg_bytes_th:
                 acc['large_jpg'] += size
 
+    jpg_optimized = False
     if ext == '.zip':
         try:
             with zipfile.ZipFile(file_path, 'r') as zf:
+                jpg_entries = []
                 for item in zf.infolist():
                     if item.is_dir():
                         continue
-                    account(item.filename.lower(), item.file_size)
+                    name_lower = item.filename.lower()
+                    account(name_lower, item.file_size)
+                    if (name_lower.endswith(JPEG_EXTENSIONS)
+                            and item.file_size >= large_jpg_bytes_th):
+                        jpg_entries.append(item)
+                # 抽樣判斷這包的 JPG 是否已最佳化（resize 產物一律是 zip）
+                jpg_optimized = _sample_zip_jpgs_optimized(zf, jpg_entries)
             is_success = True
         except Exception:
             is_success = False
@@ -216,6 +284,7 @@ def get_archive_image_stats(file_path, hash_cache):
         'png_bytes': acc['png'],
         'jpg_bytes': acc['jpg'],
         'large_jpg_bytes': acc['large_jpg'],
+        'jpg_optimized': jpg_optimized,
     }
     if hash_key and is_success:
         hash_cache[hash_key] = stats
@@ -239,11 +308,20 @@ def is_slim_target(stats):
     """統一的『值得瘦身』判準：達標 PNG 佔比，或過大 JPG 佔比達門檻。
 
     analysis / moveToResize / 關鍵字搜尋共用同一判準，避免 JPG 包在中途被濾掉。
+    若抽樣顯示這包的 JPG 已最佳化，且沒有可轉的 PNG，則視為已處理完畢、不再列入。
     """
     if not stats['success']:
         return False
-    return (stats_png_ratio(stats) >= TARGET_PNG_RATIO
-            or stats_large_jpg_ratio(stats) >= JPEG_PROBLEM_RATIO)
+
+    has_png = stats_png_ratio(stats) >= TARGET_PNG_RATIO
+    if has_png:
+        return True
+
+    # 沒有可轉的 PNG，且 JPG 抽樣判定已最佳化 → 再跑也省不了，直接排除
+    if stats.get('jpg_optimized'):
+        return False
+
+    return stats_large_jpg_ratio(stats) >= JPEG_PROBLEM_RATIO
 
 
 def get_png_ratio_with_cache(file_path, hash_cache, min_single_kb=MIN_SINGLE_PNG_KB):
