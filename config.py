@@ -48,7 +48,10 @@ JPEG_PROBLEM_RATIO = 0.30   # 過大 JPG 佔壓縮包內容比例達此值 → �
 ESTIMATED_JPG_REDUCTION_RATE = 0.20   # 預估過大 JPG 重整後可省下的體積比例（保守估算，僅供排序）
 
 # --- resize 階段：逐檔讀 marker 判斷該不該修正 ---
-JPEG_MAX_LONG_EDGE          = 4000  # 長邊超過此像素 → 標記解析度過大（僅提示，暫不縮圖）
+JPEG_MAX_LONG_EDGE          = 4000  # 長邊超過此像素 → 標記解析度過大
+# 是否允許縮解析度。預設關閉：關閉時「解析度過大」只當資訊提示、不觸發修正，
+# 避免「已最佳化但尺寸本來就大」的圖每輪被重複丟去處理。
+JPEG_ENABLE_DOWNSCALE       = False
 JPEG_RECOMPRESS_MIN_QUALITY = 95    # 估算品質 >= 此值才建議重壓
 JPEG_SKIP_BELOW_QUALITY     = 85    # 估算品質 < 此值 → 跳過以保護畫質
 

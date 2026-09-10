@@ -6,6 +6,7 @@
 """
 from config import (
     JPEG_MAX_LONG_EDGE, JPEG_RECOMPRESS_MIN_QUALITY, JPEG_SKIP_BELOW_QUALITY,
+    JPEG_ENABLE_DOWNSCALE,
 )
 
 # JPEG 規格書 Annex K.1 標準亮度量化表（自然順序 8x8）
@@ -182,9 +183,13 @@ def classify_jpeg(report):
     if baseline:
         reasons.append('baseline(可轉progressive)')
 
-    if oversized and (overquality or full_chroma):
+    # 縮解析度關閉時，「解析度過大」只保留在 reasons 當資訊，不參與動作判定；
+    # 否則已最佳化但尺寸本來就大的圖會每輪都被判定需修正、重複空跑。
+    scale_fix = oversized and JPEG_ENABLE_DOWNSCALE
+
+    if scale_fix and (overquality or full_chroma):
         action = 'downscale+recompress'
-    elif oversized:
+    elif scale_fix:
         action = 'downscale'
     elif overquality or full_chroma:
         action = 'recompress'
