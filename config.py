@@ -66,8 +66,23 @@ JPEG_SKIP_BELOW_QUALITY     = 85    # 估算品質 < 此值 → 跳過以保護�
 #   'off'    = 完全不做 JPG 體檢
 # （A/B 皆用 pip 套件 mozjpeg-lossless-optimization，免裝外部 exe）
 JPEG_FIX_MODE           = 'auto'
-JPEG_TARGET_QUALITY     = 92   # auto 模式 B（重壓）的目標品質
+JPEG_TARGET_QUALITY     = 92   # B（重壓）對「寫實/照片類」內容的目標品質
 JPEG_TARGET_SUBSAMPLING = 2    # B 重壓的色度抽樣：2 = 4:2:0（省空間、肉眼幾乎無感）
+
+# --- 依內容分流：平塗（賽璐璐風）可以壓得更兇，寫實紋理則保守 ---
+# 判斷指標是「顏色數佔比」：把圖以 NEAREST 取樣成小圖後，相異顏色數 / 總像素。
+# 實測分離度很大——真實照片 36~74%，平塗類 0~9%，中間有約 27 個百分點的空隙。
+# 低於門檻視為平塗 → 用 JPEG_FLAT_QUALITY；否則用 JPEG_TARGET_QUALITY。
+# 門檻預設偏保守（偏向判成寫實），寧可少省一點也不要壓壞細節多的圖。
+# 想校準成自己收藏的實際分佈，用 quality_test.py 看每張圖的實測值。
+JPEG_FLAT_QUALITY       = 80    # 平塗內容的目標品質；設成與 JPEG_TARGET_QUALITY 相同即等於關閉分流
+JPEG_FLAT_COLOR_RATIO   = 0.15  # 顏色數佔比低於此值 → 判定為平塗
+JPEG_CONTENT_SAMPLE_SIZE = 160  # 判定用的取樣邊長（越大越準也越慢；160 約 5ms/張）
+
+# --- 整包驗收：省太少就整包放棄，保留原檔 ---
+# 重壓一定有畫質代價，若整包只省下個位數百分比，等於付出代價卻換不到空間，
+# 不如原封不動。設 0 表示不啟用這道檢查。
+MIN_ARCHIVE_SAVING_RATIO = 0.10   # 整包縮減低於 10% → 放棄替換
 
 # ================= 共用常數 =================
 # 支援掃描 / 處理的壓縮格式（副檔名皆為小寫）

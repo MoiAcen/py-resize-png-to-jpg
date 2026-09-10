@@ -25,9 +25,12 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageStat
 
-from config import JPEG_TARGET_SUBSAMPLING
+from config import (
+    JPEG_TARGET_SUBSAMPLING, JPEG_FLAT_COLOR_RATIO,
+    JPEG_FLAT_QUALITY, JPEG_TARGET_QUALITY,
+)
 from common_utils import clean_str
-from resize import _recompress_bytes   # 直接重用生產路徑，確保結果一致
+from resize import _recompress_bytes, pick_quality_for   # 直接重用生產路徑，確保結果一致
 
 JPEG_SUFFIXES = ('.jpg', '.jpeg')
 
@@ -155,10 +158,15 @@ def run_one(display_name, jpg_path, qualities, out_dir, report):
         print(f"  ❌ 無法開啟 [{safe}]：{e}")
         return
 
+    auto_q, ratio, kind = pick_quality_for(orig)
+    kind_txt = '平塗(賽璐璐類)' if kind == 'flat' else '寫實(照片類)'
+    info = (f"   原檔 {orig.size[0]}x{orig.size[1]}  {human(orig_bytes)}\n"
+            f"   內容判定: 顏色數佔比 {ratio * 100:.2f}% "
+            f"(門檻 {JPEG_FLAT_COLOR_RATIO * 100:.0f}%) → {kind_txt}，自動選用 Q{auto_q}")
     print(f"\n■ {safe}")
-    print(f"   原檔 {orig.size[0]}x{orig.size[1]}  {human(orig_bytes)}")
+    print(info)
     report.append(f"\n■ {safe}")
-    report.append(f"   原檔 {orig.size[0]}x{orig.size[1]}  {human(orig_bytes)}")
+    report.append(info)
 
     header = f"   {'品質':<8}{'大小':>12}{'縮減':>9}{'PSNR':>10}"
     print(header)
@@ -248,7 +256,11 @@ def main():
     print('   1. 先看 *_crop.png —— 那是最糟的區域，這裡能接受就整張都能接受')
     print('   2. 再把 *_q80.jpg 等丟進 NeeView 全螢幕看，那才是你平常的觀看情境')
     print('   3. 平塗風格通常降到 Q80 也看不出來；寫實紋理請看仔細一點')
-    print(f'   4. 決定好之後改 config.py 的 JPEG_TARGET_QUALITY')
+    print('   4. 上面每張都有「顏色數佔比」——那是自動分流用的指標。')
+    print(f'      若判定跟你的認知不符，調 config.py 的 JPEG_FLAT_COLOR_RATIO'
+          f'（目前 {JPEG_FLAT_COLOR_RATIO * 100:.0f}%）')
+    print(f'   5. 品質本身則調 JPEG_FLAT_QUALITY(平塗，目前 Q{JPEG_FLAT_QUALITY}) '
+          f'與 JPEG_TARGET_QUALITY(寫實，目前 Q{JPEG_TARGET_QUALITY})')
     print('=' * 60)
     return 0
 
