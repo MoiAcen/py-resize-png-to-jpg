@@ -20,7 +20,7 @@ from common_utils import (
     load_processed_files, save_clean_file,
     load_hash_cache, save_hash_cache,
     get_archive_image_stats, stats_png_ratio, stats_large_jpg_ratio,
-    load_lowgain_flags, flag_key,
+    load_lowgain_flags, flag_key, is_numeric_noise_tag,
 )
 
 
@@ -134,6 +134,9 @@ def main():
             continue
 
         for raw_tag_name in tags:
+            # 純數字短號（1、2、…、1234）是集數/序號，讓它上榜只會把不相干的包湊成一堆
+            if is_numeric_noise_tag(raw_tag_name):
+                continue
             tag_key = raw_tag_name.lower()
             stats = tag_stats[tag_key]
             if not stats['display_name']:
@@ -161,9 +164,11 @@ def main():
                 stats['jpg_problem_disk_mb'] += jpg_disk_mb
                 stats['est_saved_disk_mb'] += jpg_disk_mb * ESTIMATED_JPG_REDUCTION_RATE
 
+        display_tags = [t for t in tags if not is_numeric_noise_tag(t)] or tags
+
         if png_ratio >= TARGET_PNG_RATIO:
             target_found_count += 1
-            safe_tag = clean_str(tags[0])
+            safe_tag = clean_str(display_tags[0])
             safe_name = clean_str(file_path.name)
             cache_tag = "⚡Binary快取" if not is_new_scan else "🔍新解析"
             print(
@@ -173,7 +178,7 @@ def main():
             )
         elif is_jpg_problem:
             jpg_problem_found_count += 1
-            safe_tag = clean_str(tags[0])
+            safe_tag = clean_str(display_tags[0])
             safe_name = clean_str(file_path.name)
             print(
                 f"🖼️ [疑似過大JPG包] [{safe_tag}] -> {safe_name} "

@@ -16,6 +16,7 @@ from pathlib import Path
 from config import (
     LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
     MIN_SINGLE_PNG_KB, POSSIBLE_7Z_PATHS, IGNORED_TAG_KEYS,
+    MAX_NUMERIC_NOISE_DIGITS,
     JPEG_EXTENSIONS, JPEG_LARGE_KB, TARGET_PNG_RATIO, JPEG_PROBLEM_RATIO,
     JPEG_OPTIMIZED_SAMPLE_COUNT, LOWGAIN_FLAG_FILE,
     QUALITY, JPEG_TARGET_QUALITY, JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO,
@@ -41,6 +42,16 @@ def format_mb_or_gb(mb_value):
 # 先把忽略清單正規化成小寫，讓比對大小寫無關
 # （config 裡不論寫 'Uncensored' 還 'uncensored'、'AI生成' 都能命中）
 _IGNORED_TAG_KEYS_LOWER = {k.lower() for k in IGNORED_TAG_KEYS}
+
+
+def is_numeric_noise_tag(tag):
+    """判斷標籤是不是「純數字的短組合」(1、2、…、1234)。
+
+    這種多半是集數或序號，拿來排行榜彙總會把不相干的包湊成一堆。
+    作品 ID 那種長數字位數夠長，不會被判成雜訊。
+    刻意只給排行榜用：使用者若真的拿數字當關鍵字搜尋，還是要找得到。
+    """
+    return tag.isdigit() and len(tag) <= MAX_NUMERIC_NOISE_DIGITS
 
 
 def extract_all_tags(filename):
