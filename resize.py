@@ -272,25 +272,54 @@ def write_failed_report(dst_path, failed_members, err_msg):
         return False
 
 
+def claim_jpg_path(png_path):
+    """為一張 PNG 佔下不會撞名的 .jpg 輸出路徑，回傳 (路徑, 是否撞名改名)。
+
+    包內同時有 X.png 與 X.jpg 時（兩種格式並存的包很常見），直接寫 X.jpg
+    會把先前已經處理好的那張蓋掉：兩個檔進去只剩一個出來，整包卡在數量驗收。
+    撞名時改用「原檔名.jpg」(X.png.jpg)，一眼看得出這張是從 PNG 轉來的。
+
+    轉檔是多進程併發跑的，所以用 O_CREAT|O_EXCL 原子佔名，
+    避免兩個 worker 先後 exists() 之後搶到同一個檔名。
+    """
+    ideal = png_path.with_suffix('.jpg')
+    candidates = [ideal, png_path.with_name(png_path.name + '.jpg')]
+    counter = 1
+    while True:
+        for cand in candidates:
+            try:
+                os.close(os.open(cand, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                return cand, cand != ideal
+            except FileExistsError:
+                pass
+        candidates = [png_path.with_name(f"{png_path.name} ({counter}).jpg")]
+        counter += 1
+
+
 def convert_single_image_worker(args):
-    """Worker：將單張 PNG 轉為 JPG。只有轉出更小才保留並刪除原 PNG。"""
+    """Worker：將單張 PNG 轉為 JPG。只有轉出更小才保留並刪除原 PNG。
+
+    回傳 (是否成功轉換, 是否因撞名而改了檔名)。
+    """
     img_path_str, quality = args
     img_path = Path(img_path_str)
 
     if img_path.suffix.lower() != '.png':
-        return False
+        return False, False
 
+    jpg_path = None
     try:
         orig_stat = img_path.stat()
         orig_size = orig_stat.st_size
         orig_atime = orig_stat.st_atime
         orig_mtime = orig_stat.st_mtime
 
+        jpg_path, collided = claim_jpg_path(img_path)
+
         with Image.open(img_path) as img:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
 
-            jpg_path = img_path.with_suffix('.jpg')
             img.save(jpg_path, format='JPEG', quality=quality, optimize=True)
 
         if jpg_path.stat().st_size < orig_size:
@@ -299,13 +328,19 @@ def convert_single_image_worker(args):
             except Exception:
                 pass
             img_path.unlink()
-            return True
+            return True, collided
 
         # 轉出反而更大：放棄 JPG，保留原 PNG
         jpg_path.unlink()
-        return False
+        return False, False
     except Exception:
-        return False
+        # 失敗要清掉佔位檔／半成品，否則產出會憑空多一個檔，一樣過不了數量驗收
+        if jpg_path is not None:
+            try:
+                jpg_path.unlink()
+            except Exception:
+                pass
+        return False, False
 
 
 def report_jpeg_health(all_extracted_files):
@@ -561,10 +596,14 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
 
         # 2. 派工器分派 PNG 轉檔任務（若有）
         converted_cnt = 0
+        renamed_cnt = 0
         if png_files:
             tasks = [(str(png_path), QUALITY) for png_path in png_files]
             futures = [pool.submit(convert_single_image_worker, task) for task in tasks]
-            converted_cnt = sum(1 for f in as_completed(futures) if f.result())
+            for fut in as_completed(futures):
+                ok, collided = fut.result()
+                converted_cnt += int(ok)
+                renamed_cnt += int(collided)
 
         # 3. 重新打包成 ZIP
         base_filename, _ = os.path.splitext(archive_path)
@@ -591,6 +630,9 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
             f"  📊 核對: 原有 {input_item_count} 檔 ──> 產出 {output_item_count} 檔 "
             f"(處理 {converted_cnt} 張 PNG + 修正 {jpg_fixed} 張 JPG，總耗時 {total_time:.1f} 秒)"
         )
+        if renamed_cnt:
+            print(f"  🔀 有 {renamed_cnt} 張 PNG 的目標檔名與包內既有 JPG 相同，"
+                  f"已改存為「原檔名.jpg」避免蓋掉既有的圖")
 
         # 4. 驗收、時間繼承與替換
         if input_item_count != output_item_count:
