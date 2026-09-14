@@ -48,6 +48,20 @@ _IGNORED_TAG_PATTERN = re.compile(
     '^(?:' + '|'.join(IGNORED_TAG_PATTERNS) + ')$', re.IGNORECASE
 ) if IGNORED_TAG_PATTERNS else None
 _TAG_SPLIT_RE = re.compile(TAG_SEPARATORS)       # 把一個括號拆成多個標籤
+_BRACKET_GROUP_RE = re.compile(r'[\[【\(\（][^\]】\)\）]*[\]】\)\）]')   # 整組括號
+
+
+def fallback_tag(filename):
+    """標籤全被濾掉（或本來就沒括號）時，改用檔名本身當歸類依據。
+
+    要無視的是那個雜訊標籤，不是這個壓縮包——沒有這條，
+    [Part 2] ccc.zip 這種檔案會連掃都不掃、完全從統計和排行榜消失。
+    先把括號群組拿掉，剩下的主檔名才是有辨識度的部分；
+    整個檔名都是括號就退回完整主檔名。
+    """
+    stem = Path(filename).stem
+    rest = ' '.join(_BRACKET_GROUP_RE.sub(' ', stem).split())
+    return rest or stem.strip()
 
 
 def is_noise_tag(tag):
@@ -80,6 +94,12 @@ def extract_all_tags(filename):
                 continue
             seen.add(t_str.lower())
             clean_tags.append(t_str)
+
+    if not clean_tags:
+        # 括號裡全是雜訊、或根本沒有括號：仍然要讓這個包進得了統計與排行榜
+        fb = fallback_tag(filename)
+        if fb:
+            clean_tags.append(fb)
     return clean_tags
 
 
