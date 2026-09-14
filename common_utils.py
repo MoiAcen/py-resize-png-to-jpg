@@ -18,7 +18,7 @@ from config import (
     MIN_SINGLE_PNG_KB, POSSIBLE_7Z_PATHS, IGNORED_TAG_KEYS,
     IGNORED_TAG_PATTERNS, TAG_SEPARATORS,
     JPEG_EXTENSIONS, JPEG_LARGE_KB, TARGET_PNG_RATIO, JPEG_PROBLEM_RATIO,
-    JPEG_OPTIMIZED_SAMPLE_COUNT, LOWGAIN_FLAG_FILE,
+    JPEG_OPTIMIZED_SAMPLE_COUNT, LOWGAIN_FLAG_FILE, MANUAL_TAG_FILE,
     QUALITY, JPEG_TARGET_QUALITY, JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO,
     JPEG_TARGET_SUBSAMPLING, MIN_ARCHIVE_SAVING_RATIO,
 )
@@ -64,8 +64,93 @@ def is_noise_tag(tag):
     return bool(_IGNORED_TAG_PATTERN and _IGNORED_TAG_PATTERN.match(t))
 
 
+# ================= 手動標籤（檔名 → 額外標籤）=================
+# 檔名裡找不到標籤的包，可以在搬移工具裡用關鍵字把它們掛成同一個標籤。
+# 只記在 MANUAL_TAG_FILE，不改檔名，所以壓縮包的快取與修改時間都不受影響。
+_manual_tags_raw = None      # 檔案原樣（保留檔名大小寫，方便人工檢視編輯）
+_manual_tags_index = None    # 小寫檔名 → 標籤清單，查詢用
+
+
+def load_manual_tags(force=False):
+    """讀取手動標籤對照表；force=True 可在外部改過檔案後重讀。"""
+    global _manual_tags_raw, _manual_tags_index
+    if _manual_tags_raw is None or force:
+        data = {}
+        if os.path.exists(MANUAL_TAG_FILE):
+            try:
+                with open(MANUAL_TAG_FILE, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = {k: [str(t) for t in v]
+                            for k, v in loaded.items() if isinstance(v, list)}
+            except Exception as e:
+                print(f"⚠️ 手動標籤讀取失敗: {e}")
+        _manual_tags_raw = data
+        _manual_tags_index = {k.lower(): v for k, v in data.items()}
+    return _manual_tags_raw
+
+
+def save_manual_tags(mapping):
+    """寫回手動標籤對照表，並同步記憶體索引。"""
+    global _manual_tags_raw, _manual_tags_index
+    try:
+        with open(MANUAL_TAG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(mapping, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 手動標籤寫入失敗: {e}")
+        return False
+    _manual_tags_raw = dict(mapping)
+    _manual_tags_index = {k.lower(): v for k, v in mapping.items()}
+    return True
+
+
+def manual_tags_for(filename):
+    """這個檔名被手動掛了哪些標籤。"""
+    load_manual_tags()
+    return _manual_tags_index.get(filename.lower(), [])
+
+
+def add_manual_tags(filenames, tag):
+    """把同一個標籤掛到多個檔名上，回傳實際新增的筆數（已經有的不重複加）。"""
+    tag = tag.strip()
+    if not tag:
+        return 0
+
+    mapping = dict(load_manual_tags())
+    lower_index = {k.lower(): k for k in mapping}
+    added = 0
+    for name in filenames:
+        key = lower_index.get(name.lower(), name)
+        existing = list(mapping.get(key, []))
+        if any(t.lower() == tag.lower() for t in existing):
+            continue
+        existing.append(tag)
+        mapping[key] = existing
+        lower_index[key.lower()] = key
+        added += 1
+
+    if added and not save_manual_tags(mapping):
+        return 0
+    return added
+
+
 def extract_all_tags(filename):
-    """從檔名的 []【】()（） 括號中抓出標籤，並濾掉雜訊關鍵字（大小寫無關）。"""
+    """從檔名的 []【】()（） 括號中抓出標籤，並濾掉雜訊關鍵字（大小寫無關）。
+
+    手動標籤優先且「取代」檔名推出來的標籤：被手動掛過的檔案完全以對照表為準。
+    不取代的話，[tako123] aa.zip 會同時掛在 tako123 與 tako 兩個排行項目底下，
+    就沒辦法把搜到的檔案真的收攏成同一個排序標籤。
+    """
+    manual = []
+    manual_seen = set()
+    for t in manual_tags_for(filename):
+        t_str = t.strip()
+        if t_str and t_str.lower() not in manual_seen:
+            manual_seen.add(t_str.lower())
+            manual.append(t_str)
+    if manual:
+        return manual
+
     raw_tags = re.findall(r'[\[【\(\（]\s*([^\]】\)\）]+?)\s*[\]】\)\）]', filename)
     clean_tags = []
     seen = set()

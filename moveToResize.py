@@ -14,7 +14,7 @@ from pathlib import Path
 
 from config import (
     SOURCE_DIR, TARGET_DIR, LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
-    RESIZE_SCRIPT_NAME, MIN_ARCHIVE_SIZE_MB, ESTIMATED_REDUCTION_RATE,
+    RESIZE_SCRIPT_NAME, MANUAL_TAG_FILE, MIN_ARCHIVE_SIZE_MB, ESTIMATED_REDUCTION_RATE,
     SHOW_TOP_N, RANK_PAGE_SIZE, EXTRA_ANALYZE_DEFAULT,
     ESTIMATED_JPG_REDUCTION_RATE, JPEG_PROBLEM_RATIO, ARCHIVE_EXTENSIONS,
 )
@@ -23,6 +23,7 @@ from common_utils import (
     save_clean_file, load_targets_cache, load_hash_cache, save_hash_cache,
     get_archive_image_stats, stats_png_ratio, stats_large_jpg_ratio,
     is_slim_target, get_safe_destination, load_lowgain_flags, flag_key,
+    add_manual_tags,
 )
 
 
@@ -51,6 +52,35 @@ def clear_all_caches():
         print("💡 目前沒有任何快取檔可清除喵！")
 
 
+def files_matching_keyword(all_files, kw):
+    """純檔名/標籤比對，列出關鍵字命中的壓縮包檔名。
+
+    不開檔、不看內容，也不受黑名單與體積門檻影響——掛標籤是「怎麼歸類」，
+    跟「這包值不值得瘦身」是兩回事。
+    """
+    kw_clean = kw.strip().lower()
+    hits = []
+    for f in all_files:
+        tags = extract_all_tags(f.name)
+        if any(kw_clean in t.lower() for t in tags) or kw_clean in f.name.lower():
+            hits.append(f.name)
+    return hits
+
+
+def apply_keyword_tag(kw, hit_names):
+    """把關鍵字掛成這些檔案的排序標籤（只寫對照表，不動檔名）。"""
+    tag = kw.strip()
+    added = add_manual_tags(hit_names, tag)
+    if added:
+        print(f"\n🏷️ 已把標籤「{tag}」掛到 {added} 個檔案上"
+              f"（記錄在 {MANUAL_TAG_FILE.name}，檔名一個字都沒改）")
+        print(f"   這 {len(hit_names)} 個包之後只會歸在 [{tag}] 這一個排序標籤底下；")
+        print("   下次跑分析、或選 [E] 追加解析之後，排行榜就會反映出來喵！")
+    else:
+        print(f"\n💡 這 {len(hit_names)} 個檔案都已經掛過標籤「{tag}」了喵！")
+    return added
+
+
 def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
     """現場針對關鍵字即時精算，回傳使用者選定要搬移的標籤清單。"""
     kw_clean = kw.strip().lower()
@@ -59,6 +89,7 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
     print(f"\n🔍 正在全域對 [{SOURCE_DIR}] 進行即時檔頭精算（關鍵字: 「{kw}」）...")
 
     all_files = list_archives(src_path)
+    keyword_hits = files_matching_keyword(all_files, kw)
 
     tag_stats = defaultdict(lambda: {
         'display_name': '',
@@ -132,6 +163,11 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
 
     if not tag_stats:
         print(f"❌ 現場沒有找到任何包含關鍵字「{kw}」且符合瘦身條件的壓縮包喵！")
+        if keyword_hits:
+            # 沒有可瘦身的包，不代表不能整理歸類
+            print(f"💡 不過有 {len(keyword_hits)} 個檔名命中這個關鍵字。")
+            if input(f"👉 要把「{kw.strip()}」設成這些檔案的排序標籤嗎？(y/N): ").strip().lower() == 'y':
+                apply_keyword_tag(kw, keyword_hits)
         return None
 
     results = sorted(tag_stats.values(), key=lambda x: x['est_saved_disk_mb'], reverse=True)
@@ -157,9 +193,15 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
     print("-" * 75)
     print(" [A] 搬移上述分析到的【全部符合標籤】")
     print(" [1~N] 選擇上述單一標籤")
+    if keyword_hits:
+        print(f" [T] 把「{kw.strip()}」設成命中的 {len(keyword_hits)} 個檔案的排序標籤")
+        print("     (只記在工具、不改檔名；這些檔案之後只會歸在這一個標籤底下)")
     print("-" * 75)
 
     sub_choice = input("👉 請選擇要執行的選項: ").strip().upper()
+    if sub_choice == 'T' and keyword_hits:
+        apply_keyword_tag(kw, keyword_hits)
+        return None
     if sub_choice == 'A':
         return [r['display_name'] for r in results if r['qualified_count'] > 0]
     if sub_choice.isdigit():
