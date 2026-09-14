@@ -32,6 +32,11 @@ RESIZE_SCRIPT_NAME = "resize.py"
 # ================= 掃描 / 分析門檻 =================
 SHOW_TOP_N               = 20     # 排行榜顯示數量
 MAX_TARGET_FILES         = 5000   # 分析目標上限包數
+# 每輪至少要「新解析」幾個包。抓滿上限之後若本輪新解析的數量還不到這個額度，
+# 就繼續往下讀更多沒掃過的檔案，補滿再進排名——這樣快取才會一輪一輪把收藏庫吃完，
+# 而不是每次都只重複啃前面那幾個資料夾。沒有更多檔案可讀就直接進排名。
+# 設 0 表示不啟用（抓滿上限就立刻停止讀新檔）。
+EXTRA_SCAN_QUOTA         = 500
 MIN_ARCHIVE_SIZE_MB      = 50     # 壓縮包體積門檻 (MB)，小於此值直接略過
 TARGET_PNG_RATIO         = 0.30   # 內部 PNG 容量佔比門檻（>= 才算達標）
 MIN_SINGLE_PNG_KB        = 100    # 忽略小於此大小的碎圖 (KB)
@@ -110,12 +115,25 @@ POSSIBLE_7Z_PATHS = [
 # 全域生效：這裡列到的字串一律不會被當成標籤。
 IGNORED_TAG_KEYS = {
     'ai generated', 'fanbox', 'patreon', 'pixiv', 'unifans',
-    'Uncensored', 'AI生成', '同人CG集',
-    '1', '2', '3', '4', 'V',
+    'Uncensored', 'Decensored', 'Extra', 'AI生成', '同人CG集',
+    'V',
 }
 
-# 純數字標籤的長度到幾位數為止算雜訊（1、2、…、1234 都排除）。
-# 這種短號是集數/序號，拿來當標籤只會把不相干的包湊成一堆；
-# [45088166] 這類長數字是作品 ID，位數夠長所以會留著。
-# 只在【排行榜彙總】時生效——直接拿數字當關鍵字搜尋時仍然找得到。
-MAX_NUMERIC_NOISE_DIGITS = 4
+# 整串標籤符合這些樣式就當雜訊（大小寫無關，自動錨定頭尾）。
+# 數字的部分沒辦法逐一列舉，所以這些用樣式比對而不是列在 IGNORED_TAG_KEYS：
+#   part[\s._-]*\d+  → [Part 2]、[Part.03]、[Part-10] 這種分卷序號
+#                      （Parts、Particle2 不會誤中，因為樣式錨定頭尾）
+#   \d{1,4}          → [1]、[23]、[1234] 這種短號，是集數/序號而不是標籤；
+#                      [45088166] 這類作品 ID 位數夠長，不會被這條打到
+IGNORED_TAG_PATTERNS = (
+    r'part[\s._-]*\d+',
+    r'\d{1,4}',
+)
+
+# 一個括號裡用斜線隔開時是「多個標籤」而不是一個複合名稱，要拆開各自判斷：
+#   [Decensored ⧸ Uncensored] → Decensored、Uncensored 兩個標籤（兩個都是雜訊，都丟掉）
+#   [Kurohime ⧸ Uncensored]   → Kurohime 留下、Uncensored 丟掉
+# Windows 檔名不能放 '/'，常被代換成 '⧸'，所以這幾種都收進來。
+# 刻意不拆空白——作者名本來就可能有空格，拆了會把名字打散。
+TAG_SEPARATORS = r'[/⧸∕／\\＼|｜]'
+
