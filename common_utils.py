@@ -16,6 +16,7 @@ from pathlib import Path
 from config import (
     LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
     MIN_SINGLE_PNG_KB, POSSIBLE_7Z_PATHS, IGNORED_TAG_KEYS,
+    IGNORED_TAG_PATTERNS, TAG_SEPARATORS,
     MAX_NUMERIC_NOISE_DIGITS,
     JPEG_EXTENSIONS, JPEG_LARGE_KB, TARGET_PNG_RATIO, JPEG_PROBLEM_RATIO,
     JPEG_OPTIMIZED_SAMPLE_COUNT, LOWGAIN_FLAG_FILE,
@@ -43,6 +44,26 @@ def format_mb_or_gb(mb_value):
 # （config 裡不論寫 'Uncensored' 還 'uncensored'、'AI生成' 都能命中）
 _IGNORED_TAG_KEYS_LOWER = {k.lower() for k in IGNORED_TAG_KEYS}
 
+# 樣式比對（[Part 2] 這類序號）與複合標籤拆解用的分隔符，都先編譯好重複使用
+_IGNORED_TAG_PATTERN = re.compile(
+    '^(?:' + '|'.join(IGNORED_TAG_PATTERNS) + ')$', re.IGNORECASE
+) if IGNORED_TAG_PATTERNS else None
+_TAG_SPLIT_RE = re.compile(TAG_SEPARATORS)       # 把一個括號拆成多個標籤
+
+
+def is_noise_tag(tag):
+    """單一標籤是不是雜訊：對得上忽略清單，或長得像 [Part 2] 這種分卷序號。
+
+    標籤本來就是一個括號一個（[Part 2] [Extra] 是分開的兩個），
+    所以整串比對就夠。刻意不拆詞——拆了會把 'Extra Kurohime' 這種名字誤判成雜訊。
+    """
+    t = tag.strip()
+    if not t:
+        return True
+    if t.lower() in _IGNORED_TAG_KEYS_LOWER:
+        return True
+    return bool(_IGNORED_TAG_PATTERN and _IGNORED_TAG_PATTERN.match(t))
+
 
 def is_numeric_noise_tag(tag):
     """判斷標籤是不是「純數字的短組合」(1、2、…、1234)。
@@ -58,9 +79,17 @@ def extract_all_tags(filename):
     """從檔名的 []【】()（） 括號中抓出標籤，並濾掉雜訊關鍵字（大小寫無關）。"""
     raw_tags = re.findall(r'[\[【\(\（]\s*([^\]】\)\）]+?)\s*[\]】\)\）]', filename)
     clean_tags = []
-    for t in raw_tags:
-        t_str = t.strip()
-        if t_str and t_str.lower() not in _IGNORED_TAG_KEYS_LOWER:
+    seen = set()
+    for raw in raw_tags:
+        # 一個括號可能裝了好幾個標籤（[A ⧸ B]），拆開後逐一判斷
+        for t in _TAG_SPLIT_RE.split(raw):
+            t_str = t.strip()
+            if not t_str or is_noise_tag(t_str):
+                continue
+            # 同一個檔名重複出現的標籤只留一次，免得統計被重複計算
+            if t_str.lower() in seen:
+                continue
+            seen.add(t_str.lower())
             clean_tags.append(t_str)
     return clean_tags
 
@@ -256,13 +285,16 @@ def zip_has_work(file_path):
         return None
 
 
-def get_archive_image_stats(file_path, hash_cache):
+def get_archive_image_stats(file_path, hash_cache, cache_only=False):
     """只讀壓縮檔的檔頭清單，統計 PNG / JPG 容量帳。
 
     zip 直接用 Python zipfile 讀，其餘格式呼叫 7-Zip 列出清單解析。
     命中快取（且版本相符）則直接回傳，不重複掃描。
 
-    回傳: (stats: dict, 是否為本次全新解析)
+    cache_only=True 表示「只吃快取、不開新檔」：快取沒有現成資料就回傳
+    (None, False)。給排行榜用——掃描量已達上限時，快取裡已知的包仍然免費可用。
+
+    回傳: (stats: dict 或 None, 是否為本次全新解析)
       stats 內含 success / total_bytes / png_bytes / jpg_bytes / large_jpg_bytes
       - png_bytes：只計單張 >= MIN_SINGLE_PNG_KB 的 PNG
       - large_jpg_bytes：只計單張 >= JPEG_LARGE_KB 的 JPG（過大候選）
@@ -272,6 +304,9 @@ def get_archive_image_stats(file_path, hash_cache):
         cached = hash_cache[hash_key]
         if cached.get('v') == _STATS_CACHE_VERSION:
             return cached, False
+
+    if cache_only:
+        return None, False
 
     ext = file_path.suffix.lower()
     min_png_bytes = MIN_SINGLE_PNG_KB * 1024

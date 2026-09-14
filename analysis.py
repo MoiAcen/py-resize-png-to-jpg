@@ -11,7 +11,7 @@ from pathlib import Path
 
 from config import (
     SOURCE_DIR, LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE, MOVE_SCRIPT_NAME,
-    SHOW_TOP_N, MAX_TARGET_FILES, MIN_ARCHIVE_SIZE_MB,
+    SHOW_TOP_N, MAX_TARGET_FILES, EXTRA_SCAN_QUOTA, MIN_ARCHIVE_SIZE_MB,
     TARGET_PNG_RATIO, ESTIMATED_REDUCTION_RATE, ARCHIVE_EXTENSIONS,
     JPEG_PROBLEM_RATIO, ESTIMATED_JPG_REDUCTION_RATE,
 )
@@ -62,6 +62,8 @@ def main():
     print("⚡ 實體硬碟空間推演分析器 (Binary 二進制快取加速版) 啟動喵！")
     print(f"📂 快取檔: [{HASH_CACHE_FILE}] | 已載入 {len(hash_cache)} 筆 Binary 記憶體快取")
     print(f"🎯 鎖定目標: 抓滿 {MAX_TARGET_FILES} 個『內部 PNG 佔比 >= {int(TARGET_PNG_RATIO * 100)}%』的爆發包")
+    if EXTRA_SCAN_QUOTA:
+        print(f"🧮 每輪最少新解析 {EXTRA_SCAN_QUOTA} 個包；不足就繼續往下讀，讀完為止")
     print("========================================\n")
 
     tag_stats = defaultdict(lambda: {
@@ -87,11 +89,23 @@ def main():
     jpg_problem_found_count = 0
     already_optimized_count = 0
     lowgain_skipped_count = 0
+    cached_extra_count = 0        # 掃描上限之後，靠快取既有資料補進統計的包數
+    uncached_skipped_count = 0    # 掃描上限之後，快取沒有資料只好略過的包數
+
+    # 掃到上限就停止「開新檔案」，但不整個中斷：快取裡已經有結果的包是零成本的，
+    # 繼續納入統計，排行榜才不會被掃描順序截斷（前面幾個資料夾吃掉全部名額）。
+    # 另外，抓滿上限時若本輪新解析的數量還不到 EXTRA_SCAN_QUOTA，就繼續往下讀，
+    # 讓每一輪都確實推進快取的覆蓋率；檔案讀完了自然就結束迴圈進排名。
+    cache_only_mode = False
 
     for file_path in all_files:
-        if target_found_count >= MAX_TARGET_FILES:
-            print(f"\n🎉 成功抓滿 {MAX_TARGET_FILES} 個高潛力爆發包！自動暫停並產出報告喵！")
-            break
+        if (not cache_only_mode
+                and target_found_count >= MAX_TARGET_FILES
+                and new_analyzed_count >= EXTRA_SCAN_QUOTA):
+            cache_only_mode = True
+            print(f"\n🎉 已抓滿 {MAX_TARGET_FILES} 個高潛力爆發包，本輪也新解析了 "
+                  f"{new_analyzed_count} 個包（額度 {EXTRA_SCAN_QUOTA}）！"
+                  f"接下來不再開新檔案，但快取裡已知的包仍會納入排行榜喵！")
 
         # 跳過黑名單與紀錄檔本身（以小寫檔名比對）
         if (file_path.name.lower() in processed_files
@@ -113,9 +127,16 @@ def main():
 
         scanned_total_count += 1
 
-        stats_info, is_new_scan = get_archive_image_stats(file_path, hash_cache)
+        stats_info, is_new_scan = get_archive_image_stats(
+            file_path, hash_cache, cache_only=cache_only_mode)
+        if stats_info is None:
+            # 只吃快取的階段遇到沒掃過的包：這輪先不算，下次分析就會補上
+            uncached_skipped_count += 1
+            continue
         if is_new_scan:
             new_analyzed_count += 1
+        elif cache_only_mode:
+            cached_extra_count += 1
 
         is_success = stats_info['success']
         png_ratio = stats_png_ratio(stats_info)
@@ -171,19 +192,21 @@ def main():
             safe_tag = clean_str(display_tags[0])
             safe_name = clean_str(file_path.name)
             cache_tag = "⚡Binary快取" if not is_new_scan else "🔍新解析"
-            print(
-                f"🔥 [{cache_tag} 第 {target_found_count}/{MAX_TARGET_FILES} 個潛力包] "
-                f"[{safe_tag}] -> {safe_name} "
-                f"(PNG 佔比 {int(png_ratio * 100)}% | {format_mb_or_gb(archive_mb)})"
-            )
+            if not cache_only_mode:
+                print(
+                    f"🔥 [{cache_tag} 第 {target_found_count}/{MAX_TARGET_FILES} 個潛力包] "
+                    f"[{safe_tag}] -> {safe_name} "
+                    f"(PNG 佔比 {int(png_ratio * 100)}% | {format_mb_or_gb(archive_mb)})"
+                )
         elif is_jpg_problem:
             jpg_problem_found_count += 1
             safe_tag = clean_str(display_tags[0])
             safe_name = clean_str(file_path.name)
-            print(
-                f"🖼️ [疑似過大JPG包] [{safe_tag}] -> {safe_name} "
-                f"(過大JPG佔比 {int(large_jpg_ratio * 100)}% | {format_mb_or_gb(archive_mb)})"
-            )
+            if not cache_only_mode:
+                print(
+                    f"🖼️ [疑似過大JPG包] [{safe_tag}] -> {safe_name} "
+                    f"(過大JPG佔比 {int(large_jpg_ratio * 100)}% | {format_mb_or_gb(archive_mb)})"
+                )
 
     # 儲存極速 Binary 快取
     save_hash_cache(hash_cache)
@@ -191,6 +214,8 @@ def main():
     if not tag_stats:
         print("\n❌ 沒有找到任何符合條件的壓縮檔喵！")
         # 全部都被略過時也要說清楚原因，不然看起來像是掃描壞掉了
+        if uncached_skipped_count:
+            print(f"⏳ 其中 {uncached_skipped_count} 個是快取還沒有資料、掃描額度又用完而未列入的包")
         if lowgain_skipped_count:
             print(f"🏷️ 其中 {lowgain_skipped_count} 個是『試過但省太少』的標記包"
                   f"（resize.py --recheck 可重評）")
@@ -210,6 +235,14 @@ def main():
 
     print("\n" + "=" * 65)
     print(f"📊 【硬碟釋放空間推演排行榜 Top {SHOW_TOP_N}】 (本次全新解析了 {new_analyzed_count} 個檔案)")
+    if EXTRA_SCAN_QUOTA and new_analyzed_count < EXTRA_SCAN_QUOTA:
+        print(f"📖 本輪新解析 {new_analyzed_count} 個包（未達額度 {EXTRA_SCAN_QUOTA}）"
+              f"——已經沒有更多沒掃過的檔案了，直接進排名")
+    if cached_extra_count:
+        print(f"⚡ 掃描上限之後，另有 {cached_extra_count} 個包直接採用快取既有資料納入統計（零額外 I/O）")
+    if uncached_skipped_count:
+        print(f"⏳ 另有 {uncached_skipped_count} 個包快取裡還沒有資料、掃描額度也已用完，本輪未列入"
+              f"（想一併納入請調高 MAX_TARGET_FILES）")
     if lowgain_skipped_count:
         print(f"🏷️ 已略過 {lowgain_skipped_count} 個『試過但省太少』的壓縮包（resize.py --recheck 可重評）")
     if already_optimized_count:
