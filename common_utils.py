@@ -19,9 +19,17 @@ from config import (
     IGNORED_TAG_PATTERNS, TAG_SEPARATORS,
     JPEG_EXTENSIONS, JPEG_LARGE_KB, TARGET_PNG_RATIO, JPEG_PROBLEM_RATIO,
     JPEG_OPTIMIZED_SAMPLE_COUNT, LOWGAIN_FLAG_FILE, MANUAL_TAG_FILE,
+    TAG_RULE_FILE,
     QUALITY, JPEG_TARGET_QUALITY, JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO,
     JPEG_TARGET_SUBSAMPLING, MIN_ARCHIVE_SAVING_RATIO,
 )
+
+
+# Windows 檔名可能含有落單的 surrogate（例如 '\udef3'，來自無法解碼的位元組）。
+# 用一般 utf-8 寫檔會直接丟例外整批寫入失敗；errors='ignore' 則會默默把字元吃掉，
+# 讓存回去的檔名對不上真正的檔案。surrogatepass 能原樣寫出、原樣讀回，
+# 標籤在快取來回一趟之後才還對得上原始檔名。
+TEXT_IO = dict(encoding='utf-8', errors='surrogatepass')
 
 
 # ================= 字串 / 格式化 =================
@@ -78,7 +86,7 @@ def load_manual_tags(force=False):
         data = {}
         if os.path.exists(MANUAL_TAG_FILE):
             try:
-                with open(MANUAL_TAG_FILE, 'r', encoding='utf-8') as f:
+                with open(MANUAL_TAG_FILE, 'r', **TEXT_IO) as f:
                     loaded = json.load(f)
                 if isinstance(loaded, dict):
                     data = {k: [str(t) for t in v]
@@ -94,7 +102,7 @@ def save_manual_tags(mapping):
     """寫回手動標籤對照表，並同步記憶體索引。"""
     global _manual_tags_raw, _manual_tags_index
     try:
-        with open(MANUAL_TAG_FILE, 'w', encoding='utf-8') as f:
+        with open(MANUAL_TAG_FILE, 'w', **TEXT_IO) as f:
             json.dump(mapping, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️ 手動標籤寫入失敗: {e}")
@@ -134,6 +142,82 @@ def add_manual_tags(filenames, tag):
     return added
 
 
+# ================= 無標籤檔案的切割規則 =================
+# 檔名裡找不到標籤時，用「分隔符 + 第幾段」切出一個標籤（ABC-BBB-CC.zip → ABC）。
+# 只有切出來的結果在 accepted 清單裡才算數——那份清單是使用者在選單上挑過的，
+# 沒挑過的（日期、流水號那種）就維持無標籤，不會自己跑到排行榜上。
+DEFAULT_TAG_RULE = {'separator': '-', 'field': 1, 'accepted': []}
+_tag_rule_cache = None
+
+
+def load_tag_rule(force=False):
+    """讀取切割規則；讀不到就回傳預設值。"""
+    global _tag_rule_cache
+    if _tag_rule_cache is None or force:
+        rule = dict(DEFAULT_TAG_RULE)
+        if os.path.exists(TAG_RULE_FILE):
+            try:
+                with open(TAG_RULE_FILE, 'r', **TEXT_IO) as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    sep = loaded.get('separator')
+                    field = loaded.get('field')
+                    accepted = loaded.get('accepted')
+                    if isinstance(sep, str) and sep:
+                        rule['separator'] = sep
+                    if isinstance(field, int) and field >= 1:
+                        rule['field'] = field
+                    if isinstance(accepted, list):
+                        rule['accepted'] = [str(a) for a in accepted]
+            except Exception as e:
+                print(f"⚠️ 切割規則讀取失敗: {e}")
+        _tag_rule_cache = rule
+    return _tag_rule_cache
+
+
+def save_tag_rule(rule):
+    """寫回切割規則，並同步記憶體快取。"""
+    global _tag_rule_cache
+    try:
+        with open(TAG_RULE_FILE, 'w', **TEXT_IO) as f:
+            json.dump(rule, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 切割規則寫入失敗: {e}")
+        return False
+    _tag_rule_cache = dict(rule)
+    return True
+
+
+def rule_tag_from_name(filename, separator, field):
+    """依「分隔符 + 第幾段」從檔名切出標籤；切不出來回傳空字串。
+
+    檔名裡沒有這個分隔符就當規則不適用——否則每個檔案都會變成自己的標籤，
+    排行榜會被一堆只有一個檔案的項目淹掉。
+    """
+    stem = Path(filename).stem
+    if not separator or separator not in stem:
+        return ''
+    parts = [p.strip() for p in stem.split(separator)]
+    if field < 1 or field > len(parts):
+        return ''
+    return parts[field - 1]
+
+
+def accepted_rule_tag_for(filename):
+    """這個檔名用規則切出來的標籤，且必須是使用者採用過的才回傳。"""
+    rule = load_tag_rule()
+    accepted = rule.get('accepted') or []
+    if not accepted:
+        return ''
+    tag = rule_tag_from_name(filename, rule['separator'], rule['field'])
+    if not tag:
+        return ''
+    for a in accepted:
+        if a.lower() == tag.lower():
+            return a
+    return ''
+
+
 def extract_all_tags(filename):
     """從檔名的 []【】()（） 括號中抓出標籤，並濾掉雜訊關鍵字（大小寫無關）。
 
@@ -165,6 +249,12 @@ def extract_all_tags(filename):
                 continue
             seen.add(t_str.lower())
             clean_tags.append(t_str)
+
+    # 檔名裡找不到標籤時，才輪到切割規則；而且只認使用者採用過的結果
+    if not clean_tags:
+        auto = accepted_rule_tag_for(filename)
+        if auto:
+            clean_tags.append(auto)
 
     return clean_tags
 
@@ -206,7 +296,7 @@ def load_processed_files(log_file=LOG_FILE):
     processed = set()
     if os.path.exists(log_file):
         try:
-            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(log_file, 'r', **TEXT_IO) as f:
                 for line in f:
                     line_clean = line.strip().lower()
                     if line_clean:
@@ -219,7 +309,7 @@ def load_processed_files(log_file=LOG_FILE):
 def save_clean_file(filename, log_file=LOG_FILE):
     """把一個確認無 PNG 的檔名追加到黑名單。"""
     try:
-        with open(log_file, 'a', encoding='utf-8', errors='ignore') as f:
+        with open(log_file, 'a', **TEXT_IO) as f:
             f.write(f"{filename}\n")
     except Exception:
         pass
@@ -230,7 +320,7 @@ def load_targets_cache(cache_file=TARGETS_CACHE):
     """讀取 analysis.py 產出的排行榜 JSON 快取。"""
     if os.path.exists(cache_file):
         try:
-            with open(cache_file, 'r', encoding='utf-8') as f:
+            with open(cache_file, 'r', **TEXT_IO) as f:
                 return json.load(f)
         except Exception as e:
             print(f"⚠️ 快取讀取失敗: {e}")
@@ -254,7 +344,7 @@ def load_lowgain_flags():
     if not os.path.exists(LOWGAIN_FLAG_FILE):
         return {}
     try:
-        with open(LOWGAIN_FLAG_FILE, 'r', encoding='utf-8') as f:
+        with open(LOWGAIN_FLAG_FILE, 'r', **TEXT_IO) as f:
             raw = json.load(f)
     except Exception:
         return {}
@@ -270,7 +360,7 @@ def load_lowgain_flags():
 def save_lowgain_flags(flags):
     """把標記寫回磁碟（失敗時靜默略過，不影響主流程）。"""
     try:
-        with open(LOWGAIN_FLAG_FILE, 'w', encoding='utf-8') as f:
+        with open(LOWGAIN_FLAG_FILE, 'w', **TEXT_IO) as f:
             json.dump(flags, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️ 標記寫入失敗: {e}")
