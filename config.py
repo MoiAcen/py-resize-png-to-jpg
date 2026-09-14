@@ -24,13 +24,22 @@ LOG_FILE        = BASE_DIR / "analysis.bin"            # 無 PNG 黑名單
 TARGETS_CACHE   = BASE_DIR / "analysis_targets.json"   # 排行榜快取
 HASH_CACHE_FILE = BASE_DIR / "file_hash_cache.bin"     # Binary Hash 快取
 LOWGAIN_FLAG_FILE = BASE_DIR / "lowgain_skip.json"     # 「省太少而放棄」的標記，避免每次重跑空轉
+# 手動標籤對照表（檔名 → 額外標籤）。給檔名裡找不到標籤的包用：
+# 在搬移工具裡用關鍵字搜尋後，可以把那個關鍵字掛到搜到的檔案上。
+# 只記在這個檔案裡，不會更動任何檔名；清快取也不會刪它（這是人工輸入的資料）。
+MANUAL_TAG_FILE = BASE_DIR / "manual_tags.json"
 
 # ================= 腳本名稱（階段串接用）=================
 MOVE_SCRIPT_NAME   = "moveToResize.py"
 RESIZE_SCRIPT_NAME = "resize.py"
 
 # ================= 掃描 / 分析門檻 =================
-SHOW_TOP_N               = 20     # 排行榜顯示數量
+SHOW_TOP_N               = 20     # 主選單/報告直接列出的排行榜筆數
+# 寫進排行榜快取的筆數。選單只列 SHOW_TOP_N 筆，但「顯示全排名」可以翻到這麼多名，
+# 所以這個值要比 SHOW_TOP_N 大才有東西可翻。
+SAVE_RANK_N              = 200
+RANK_PAGE_SIZE           = 20     # 「顯示全排名」每頁幾筆
+EXTRA_ANALYZE_DEFAULT    = 500    # 選單「追加解析」預設要補幾筆（直接 Enter 用這個值）
 MAX_TARGET_FILES         = 5000   # 分析目標上限包數
 # 每輪至少要「新解析」幾個包。抓滿上限之後若本輪新解析的數量還不到這個額度，
 # 就繼續往下讀更多沒掃過的檔案，補滿再進排名——這樣快取才會一輪一輪把收藏庫吃完，

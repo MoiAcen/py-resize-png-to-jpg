@@ -226,3 +226,6 @@ analysis.bin
 file_hash_cache.bin
 analysis_targets.json
 lowgain_skip.json
+
+# 手動標籤對照表 (MANUAL_TAG_FILE) —— 人工輸入的資料，不是快取
+manual_tags.json

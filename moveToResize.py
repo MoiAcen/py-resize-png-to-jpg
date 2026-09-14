@@ -14,7 +14,8 @@ from pathlib import Path
 
 from config import (
     SOURCE_DIR, TARGET_DIR, LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
-    RESIZE_SCRIPT_NAME, MIN_ARCHIVE_SIZE_MB, ESTIMATED_REDUCTION_RATE,
+    RESIZE_SCRIPT_NAME, MANUAL_TAG_FILE, MIN_ARCHIVE_SIZE_MB, ESTIMATED_REDUCTION_RATE,
+    SHOW_TOP_N, RANK_PAGE_SIZE, EXTRA_ANALYZE_DEFAULT,
     ESTIMATED_JPG_REDUCTION_RATE, JPEG_PROBLEM_RATIO, ARCHIVE_EXTENSIONS,
 )
 from common_utils import (
@@ -22,6 +23,7 @@ from common_utils import (
     save_clean_file, load_targets_cache, load_hash_cache, save_hash_cache,
     get_archive_image_stats, stats_png_ratio, stats_large_jpg_ratio,
     is_slim_target, get_safe_destination, load_lowgain_flags, flag_key,
+    add_manual_tags,
 )
 
 
@@ -50,6 +52,35 @@ def clear_all_caches():
         print("💡 目前沒有任何快取檔可清除喵！")
 
 
+def files_matching_keyword(all_files, kw):
+    """純檔名/標籤比對，列出關鍵字命中的壓縮包檔名。
+
+    不開檔、不看內容，也不受黑名單與體積門檻影響——掛標籤是「怎麼歸類」，
+    跟「這包值不值得瘦身」是兩回事。
+    """
+    kw_clean = kw.strip().lower()
+    hits = []
+    for f in all_files:
+        tags = extract_all_tags(f.name)
+        if any(kw_clean in t.lower() for t in tags) or kw_clean in f.name.lower():
+            hits.append(f.name)
+    return hits
+
+
+def apply_keyword_tag(kw, hit_names):
+    """把關鍵字掛成這些檔案的排序標籤（只寫對照表，不動檔名）。"""
+    tag = kw.strip()
+    added = add_manual_tags(hit_names, tag)
+    if added:
+        print(f"\n🏷️ 已把標籤「{tag}」掛到 {added} 個檔案上"
+              f"（記錄在 {MANUAL_TAG_FILE.name}，檔名一個字都沒改）")
+        print(f"   這 {len(hit_names)} 個包之後只會歸在 [{tag}] 這一個排序標籤底下；")
+        print("   下次跑分析、或選 [E] 追加解析之後，排行榜就會反映出來喵！")
+    else:
+        print(f"\n💡 這 {len(hit_names)} 個檔案都已經掛過標籤「{tag}」了喵！")
+    return added
+
+
 def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
     """現場針對關鍵字即時精算，回傳使用者選定要搬移的標籤清單。"""
     kw_clean = kw.strip().lower()
@@ -58,6 +89,7 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
     print(f"\n🔍 正在全域對 [{SOURCE_DIR}] 進行即時檔頭精算（關鍵字: 「{kw}」）...")
 
     all_files = list_archives(src_path)
+    keyword_hits = files_matching_keyword(all_files, kw)
 
     tag_stats = defaultdict(lambda: {
         'display_name': '',
@@ -131,6 +163,11 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
 
     if not tag_stats:
         print(f"❌ 現場沒有找到任何包含關鍵字「{kw}」且符合瘦身條件的壓縮包喵！")
+        if keyword_hits:
+            # 沒有可瘦身的包，不代表不能整理歸類
+            print(f"💡 不過有 {len(keyword_hits)} 個檔名命中這個關鍵字。")
+            if input(f"👉 要把「{kw.strip()}」設成這些檔案的排序標籤嗎？(y/N): ").strip().lower() == 'y':
+                apply_keyword_tag(kw, keyword_hits)
         return None
 
     results = sorted(tag_stats.values(), key=lambda x: x['est_saved_disk_mb'], reverse=True)
@@ -156,9 +193,15 @@ def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
     print("-" * 75)
     print(" [A] 搬移上述分析到的【全部符合標籤】")
     print(" [1~N] 選擇上述單一標籤")
+    if keyword_hits:
+        print(f" [T] 把「{kw.strip()}」設成命中的 {len(keyword_hits)} 個檔案的排序標籤")
+        print("     (只記在工具、不改檔名；這些檔案之後只會歸在這一個標籤底下)")
     print("-" * 75)
 
     sub_choice = input("👉 請選擇要執行的選項: ").strip().upper()
+    if sub_choice == 'T' and keyword_hits:
+        apply_keyword_tag(kw, keyword_hits)
+        return None
     if sub_choice == 'A':
         return [r['display_name'] for r in results if r['qualified_count'] > 0]
     if sub_choice.isdigit():
@@ -281,12 +324,96 @@ def trigger_resize_prompt():
     print("=" * 65)
 
 
+def show_full_ranking(targets):
+    """分頁翻閱完整排行榜（資料來自 analysis 寫進快取的前 SAVE_RANK_N 名）。"""
+    if not targets:
+        print("💡 目前沒有排行榜快取，先跑一次 analysis.py 或選 [E] 追加解析喵！")
+        return
+
+    total = len(targets)
+    page_size = max(1, RANK_PAGE_SIZE)
+    pages = (total + page_size - 1) // page_size
+    page = 0
+
+    while True:
+        start = page * page_size
+        chunk = targets[start:start + page_size]
+
+        print("\n" + "=" * 75)
+        print(f"🏆 【完整排行榜】第 {page + 1}/{pages} 頁 (第 {start + 1}~{start + len(chunk)} 名，共 {total} 名)")
+        print("=" * 75)
+        for t in chunk:
+            tag_name = clean_str(t['tag'])
+            print(f" [{t['rank']:>3}] [{tag_name}] ── PNG: {format_mb_or_gb(t['png_mb'])} | "
+                  f"過大JPG: {format_mb_or_gb(t.get('jpg_mb', 0))} | "
+                  f"預估可省 ~{format_mb_or_gb(t['est_saved_mb'])} "
+                  f"({t['total_files']} 個檔案)")
+            if t.get('sample'):
+                print(f"          └─ 📄 {clean_str(t['sample'])}")
+        print("=" * 75)
+
+        nav = []
+        if page + 1 < pages:
+            nav.append("[Enter] 下一頁")
+        if page > 0:
+            nav.append("[P] 上一頁")
+        nav.append("[數字] 跳到第 N 頁")
+        nav.append("[Q] 回選單")
+        choice = input("👉 " + " | ".join(nav) + ": ").strip().upper()
+
+        if choice == 'Q':
+            return
+        if choice == 'P':
+            page = max(0, page - 1)
+            continue
+        if choice.isdigit():
+            want = int(choice)
+            if 1 <= want <= pages:
+                page = want - 1
+            else:
+                print(f"⚠️ 只有 {pages} 頁喵！")
+            continue
+        if page + 1 >= pages:      # 已經是最後一頁，Enter 就離開
+            return
+        page += 1
+
+
+def run_extra_analysis():
+    """追加解析：補掃指定筆數還沒解析過的壓縮包，然後重新排名。"""
+    raw = input(f"\n👉 要追加解析幾筆？(直接 Enter 用 {EXTRA_ANALYZE_DEFAULT}): ").strip()
+    if raw:
+        if not raw.isdigit() or int(raw) <= 0:
+            print("⚠️ 請輸入正整數喵！")
+            return False
+        count = int(raw)
+    else:
+        count = EXTRA_ANALYZE_DEFAULT
+
+    # 延後匯入：analysis 是用 subprocess 啟動本腳本，不會反過來 import，沒有循環問題
+    import analysis
+
+    print(f"\n🔍 開始追加解析 {count} 筆...\n" + "=" * 75)
+    try:
+        # auto_next=False：從搬移工具裡呼叫，跑完不要再把搬移工具開一次
+        analysis.main(scan_limit=count, auto_next=False)
+    except Exception as e:
+        print(f"❌ 追加解析失敗: {e} 喵！")
+        return False
+    print("=" * 75)
+    return True
+
+
 def print_menu(targets):
-    """印出主選單（含排行榜快取內容，若有）。"""
+    """印出主選單（含排行榜快取內容，若有）。
+
+    快取裡可能存了幾百名，但選單只列前 SHOW_TOP_N 名，免得洗版；
+    要看完整名次用 [R] 顯示全排名翻頁。
+    """
+    shown = targets[:SHOW_TOP_N]
     if targets:
-        print("📋 【從 analysis.py 載入的排行榜選單】：")
+        print(f"📋 【從 analysis.py 載入的排行榜選單】(共 {len(targets)} 名，以下列出前 {len(shown)} 名)：")
         print("-" * 75)
-        for t in targets:
+        for t in shown:
             tag_name = clean_str(t['tag'])
             png_str = format_mb_or_gb(t['png_mb'])
             jpg_str = format_mb_or_gb(t.get('jpg_mb', 0))
@@ -299,10 +426,13 @@ def print_menu(targets):
 
     print("-" * 75)
     if targets:
-        print(" [A] 搬移上述 Top 排行榜【全部標籤】")
+        print(f" [A] 搬移上述 Top {len(shown)} 排行榜【全部標籤】")
+        print(f" [R] 顯示全排名 (分頁翻閱全部 {len(targets)} 名)")
+        print(f" [數字] 搬移指定名次的單一標籤 (可直接輸入全排名的名次，1~{len(targets)})")
     print(" [F] 關鍵字搜尋 (發動即時精算/Hash快取)")
     print(" [0] 全域掃描所有符合條件的檔案")
     print(" [M] 手動輸入標籤進行精準比對")
+    print(" [E] 追加解析 (指定筆數，補掃還沒解析過的壓縮包後重新排名)")
     print(" [C] 徹底清除所有舊快取檔 (包含黑名單與舊 Hash 快取)")
     print(" [Q] 離開")
     print("-" * 75)
@@ -314,7 +444,7 @@ def resolve_selection(user_choice, targets, src_path, processed_files, hash_cach
         if not targets:
             print("⚠️ 目前沒有排行榜快取，請改用 [F] 關鍵字搜尋喵！")
             return None
-        selected_tags = [t['tag'] for t in targets]
+        selected_tags = [t['tag'] for t in targets[:SHOW_TOP_N]]
         print(f"\n🚀 已選擇搬移 Top {len(selected_tags)} 全榜標籤喵！")
         return selected_tags, None
 
@@ -385,6 +515,19 @@ def main():
 
         if user_choice == 'C':
             clear_all_caches()
+            print()
+            continue
+
+        if user_choice == 'R':
+            show_full_ranking(targets)
+            print()
+            continue
+
+        if user_choice == 'E':
+            if run_extra_analysis():
+                # analysis 剛把快取寫新了，重讀才拿得到剛解析出來的資料
+                hash_cache = load_hash_cache()
+                processed_files = load_processed_files()
             print()
             continue
 
