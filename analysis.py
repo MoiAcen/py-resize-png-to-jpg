@@ -105,6 +105,7 @@ def main(scan_limit=None, auto_next=True):
     jpg_problem_found_count = 0
     already_optimized_count = 0
     lowgain_skipped_count = 0
+    untagged_count = 0            # 有解析、但檔名裡找不到可用標籤，無法歸類
     cached_extra_count = 0        # 掃描上限之後，靠快取既有資料補進統計的包數
     uncached_skipped_count = 0    # 掃描上限之後，快取沒有資料只好略過的包數
 
@@ -142,9 +143,10 @@ def main(scan_limit=None, auto_next=True):
             lowgain_skipped_count += 1
             continue
 
+        # 注意順序：先讓它被分析，最後才談標籤。
+        # 「沒有可用標籤」只代表無法歸類到排行榜，不代表這個包不該被看一眼——
+        # 提早 continue 會讓它連開都不開，還會永遠卡在「尚待解析」的數字裡。
         tags = extract_all_tags(file_path.name)
-        if not tags:
-            continue
 
         archive_mb = file_path.stat().st_size / (1024 * 1024)
         if archive_mb < MIN_ARCHIVE_SIZE_MB:
@@ -179,6 +181,12 @@ def main(scan_limit=None, auto_next=True):
             already_optimized_count += 1
             continue
 
+        # 到這裡已經解析完、也寫進快取了；沒有可用標籤就只是進不了排行榜。
+        # 不 continue——下面的逐檔訊息照印，讓「有沒有被看過」看得見；
+        # 標籤為空時歸類迴圈本來就不會跑，不必特別擋。
+        if not tags:
+            untagged_count += 1
+
         for raw_tag_name in tags:
             tag_key = raw_tag_name.lower()
             stats = tag_stats[tag_key]
@@ -209,12 +217,14 @@ def main(scan_limit=None, auto_next=True):
 
         # 逐檔訊息只印「這輪真的去解析過」的包。套用快取的不再刷一次，
         # 否則幾千筆舊資料會把本輪實際做了什麼事整個蓋掉。
+        display_tag = clean_str(tags[0]) if tags else '無標籤'
+
         if png_ratio >= TARGET_PNG_RATIO:
             target_found_count += 1
             if is_new_scan:
                 print(
                     f"🔥 [🔍新解析 第 {new_analyzed_count} 筆] "
-                    f"[{clean_str(tags[0])}] -> {clean_str(file_path.name)} "
+                    f"[{display_tag}] -> {clean_str(file_path.name)} "
                     f"(PNG 佔比 {int(png_ratio * 100)}% | {format_mb_or_gb(archive_mb)})"
                 )
         elif is_jpg_problem:
@@ -222,7 +232,7 @@ def main(scan_limit=None, auto_next=True):
             if is_new_scan:
                 print(
                     f"🖼️ [🔍新解析 疑似過大JPG包] "
-                    f"[{clean_str(tags[0])}] -> {clean_str(file_path.name)} "
+                    f"[{display_tag}] -> {clean_str(file_path.name)} "
                     f"(過大JPG佔比 {int(large_jpg_ratio * 100)}% | {format_mb_or_gb(archive_mb)})"
                 )
 
@@ -259,6 +269,9 @@ def main(scan_limit=None, auto_next=True):
     elif scan_limit is None and EXTRA_SCAN_QUOTA and new_analyzed_count < EXTRA_SCAN_QUOTA:
         print(f"📖 本輪新解析 {new_analyzed_count} 個包（未達額度 {EXTRA_SCAN_QUOTA}）"
               f"——已經沒有更多沒掃過的檔案了，直接進排名")
+    if untagged_count:
+        print(f"🏷️ 另有 {untagged_count} 個包檔名裡沒有可用標籤：已解析並存進快取，"
+              f"但無法歸類到排行榜（可用 [0] 全域搬移或 [F] 關鍵字搜尋處理）")
     if cached_extra_count:
         print(f"⚡ 掃描上限之後，另有 {cached_extra_count} 個包直接採用快取既有資料納入統計（零額外 I/O）")
     if uncached_skipped_count:
