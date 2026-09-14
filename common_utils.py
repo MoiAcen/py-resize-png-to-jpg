@@ -24,6 +24,13 @@ from config import (
 )
 
 
+# Windows 檔名可能含有落單的 surrogate（例如 '\udef3'，來自無法解碼的位元組）。
+# 用一般 utf-8 寫檔會直接丟例外整批寫入失敗；errors='ignore' 則會默默把字元吃掉，
+# 讓存回去的檔名對不上真正的檔案。surrogatepass 能原樣寫出、原樣讀回，
+# 標籤在快取來回一趟之後才還對得上原始檔名。
+TEXT_IO = dict(encoding='utf-8', errors='surrogatepass')
+
+
 # ================= 字串 / 格式化 =================
 def clean_str(s):
     """把 Windows 檔名裡的 surrogate 亂碼字元換成 '?'，避免 print 崩潰。"""
@@ -78,7 +85,7 @@ def load_manual_tags(force=False):
         data = {}
         if os.path.exists(MANUAL_TAG_FILE):
             try:
-                with open(MANUAL_TAG_FILE, 'r', encoding='utf-8') as f:
+                with open(MANUAL_TAG_FILE, 'r', **TEXT_IO) as f:
                     loaded = json.load(f)
                 if isinstance(loaded, dict):
                     data = {k: [str(t) for t in v]
@@ -94,7 +101,7 @@ def save_manual_tags(mapping):
     """寫回手動標籤對照表，並同步記憶體索引。"""
     global _manual_tags_raw, _manual_tags_index
     try:
-        with open(MANUAL_TAG_FILE, 'w', encoding='utf-8') as f:
+        with open(MANUAL_TAG_FILE, 'w', **TEXT_IO) as f:
             json.dump(mapping, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️ 手動標籤寫入失敗: {e}")
@@ -206,7 +213,7 @@ def load_processed_files(log_file=LOG_FILE):
     processed = set()
     if os.path.exists(log_file):
         try:
-            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(log_file, 'r', **TEXT_IO) as f:
                 for line in f:
                     line_clean = line.strip().lower()
                     if line_clean:
@@ -219,7 +226,7 @@ def load_processed_files(log_file=LOG_FILE):
 def save_clean_file(filename, log_file=LOG_FILE):
     """把一個確認無 PNG 的檔名追加到黑名單。"""
     try:
-        with open(log_file, 'a', encoding='utf-8', errors='ignore') as f:
+        with open(log_file, 'a', **TEXT_IO) as f:
             f.write(f"{filename}\n")
     except Exception:
         pass
@@ -230,7 +237,7 @@ def load_targets_cache(cache_file=TARGETS_CACHE):
     """讀取 analysis.py 產出的排行榜 JSON 快取。"""
     if os.path.exists(cache_file):
         try:
-            with open(cache_file, 'r', encoding='utf-8') as f:
+            with open(cache_file, 'r', **TEXT_IO) as f:
                 return json.load(f)
         except Exception as e:
             print(f"⚠️ 快取讀取失敗: {e}")
@@ -254,7 +261,7 @@ def load_lowgain_flags():
     if not os.path.exists(LOWGAIN_FLAG_FILE):
         return {}
     try:
-        with open(LOWGAIN_FLAG_FILE, 'r', encoding='utf-8') as f:
+        with open(LOWGAIN_FLAG_FILE, 'r', **TEXT_IO) as f:
             raw = json.load(f)
     except Exception:
         return {}
@@ -270,7 +277,7 @@ def load_lowgain_flags():
 def save_lowgain_flags(flags):
     """把標記寫回磁碟（失敗時靜默略過，不影響主流程）。"""
     try:
-        with open(LOWGAIN_FLAG_FILE, 'w', encoding='utf-8') as f:
+        with open(LOWGAIN_FLAG_FILE, 'w', **TEXT_IO) as f:
             json.dump(flags, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️ 標記寫入失敗: {e}")

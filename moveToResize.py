@@ -23,7 +23,7 @@ from common_utils import (
     save_clean_file, load_targets_cache, load_hash_cache, save_hash_cache,
     get_archive_image_stats, stats_png_ratio, stats_large_jpg_ratio,
     is_slim_target, get_safe_destination, load_lowgain_flags, flag_key,
-    add_manual_tags,
+    add_manual_tags, TEXT_IO,
 )
 
 
@@ -231,7 +231,7 @@ def remove_tags_from_targets_cache(moved_tags):
             # 重新編號 rank，讓選單維持連續
             for new_rank, item in enumerate(remaining, start=1):
                 item['rank'] = new_rank
-            with open(TARGETS_CACHE, 'w', encoding='utf-8') as f:
+            with open(TARGETS_CACHE, 'w', **TEXT_IO) as f:
                 json.dump(remaining, f, ensure_ascii=False, indent=2)
         else:
             os.remove(TARGETS_CACHE)

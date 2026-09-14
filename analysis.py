@@ -21,7 +21,7 @@ from common_utils import (
     load_hash_cache, save_hash_cache,
     get_archive_image_stats, has_cached_stats,
     stats_png_ratio, stats_large_jpg_ratio,
-    load_lowgain_flags, flag_key,
+    load_lowgain_flags, flag_key, TEXT_IO,
 )
 
 
@@ -71,7 +71,7 @@ def main(scan_limit=None, auto_next=True):
     print(f"📂 快取檔: [{HASH_CACHE_FILE}] | 已載入 {len(hash_cache)} 筆 Binary 記憶體快取")
     print(f"🎯 鎖定目標: 抓滿 {MAX_TARGET_FILES} 個『內部 PNG 佔比 >= {int(TARGET_PNG_RATIO * 100)}%』的爆發包")
     if EXTRA_SCAN_QUOTA and scan_limit is None:
-        print(f"🧮 每輪最少新解析 {EXTRA_SCAN_QUOTA} 個包；不足就繼續往下讀，讀完為止")
+        print(f"🧮 每輪最多新解析 {EXTRA_SCAN_QUOTA} 個包；掃到就先出排行榜，下一輪繼續往下")
     print("========================================\n")
 
     tag_stats = defaultdict(lambda: {
@@ -116,11 +116,17 @@ def main(scan_limit=None, auto_next=True):
     cache_only_mode = False
 
     def scan_budget_exhausted():
-        """還能不能再開新檔案。"""
-        if scan_limit is not None:      # 追加解析：只看這輪要補幾筆
-            return new_analyzed_count >= scan_limit
-        return (target_found_count >= MAX_TARGET_FILES
-                and new_analyzed_count >= EXTRA_SCAN_QUOTA)
+        """還能不能再開新檔案。
+
+        兩個條件任一成立就停：本輪新解析的筆數到頂，或潛力包已經抓滿。
+        （這裡必須是「或」——寫成「且」的話，因為 MAX_TARGET_FILES 實際上
+        很難抓滿，筆數上限等於永遠不會生效，整個收藏庫會被一次掃完。）
+        """
+        limit = scan_limit if scan_limit is not None else EXTRA_SCAN_QUOTA
+        if limit and new_analyzed_count >= limit:
+            return True
+        # 追加解析只認筆數；預設模式才另外看「潛力包抓夠了沒」
+        return scan_limit is None and target_found_count >= MAX_TARGET_FILES
 
     for file_path in all_files:
         if not cache_only_mode and scan_budget_exhausted():
@@ -128,9 +134,12 @@ def main(scan_limit=None, auto_next=True):
             if scan_limit is not None:
                 print(f"\n✅ 已追加解析 {new_analyzed_count} 筆！"
                       f"接下來不再開新檔案，快取裡已知的包仍會納入排行榜喵！")
+            elif EXTRA_SCAN_QUOTA and new_analyzed_count >= EXTRA_SCAN_QUOTA:
+                print(f"\n✅ 本輪已新解析 {new_analyzed_count} 個包（達到上限 {EXTRA_SCAN_QUOTA}）！"
+                      f"接下來不再開新檔案，快取裡已知的包仍會納入排行榜；"
+                      f"再跑一次就會從沒掃過的繼續往下喵！")
             else:
-                print(f"\n🎉 已抓滿 {MAX_TARGET_FILES} 個高潛力爆發包，本輪也新解析了 "
-                      f"{new_analyzed_count} 個包（額度 {EXTRA_SCAN_QUOTA}）！"
+                print(f"\n🎉 已抓滿 {MAX_TARGET_FILES} 個高潛力爆發包！"
                       f"接下來不再開新檔案，但快取裡已知的包仍會納入排行榜喵！")
 
         # 跳過黑名單與紀錄檔本身（以小寫檔名比對）
@@ -267,7 +276,7 @@ def main(scan_limit=None, auto_next=True):
         print(f"📖 本輪追加解析 {new_analyzed_count} 筆（少於指定的 {scan_limit} 筆）"
               f"——已經沒有更多沒掃過的檔案了，直接進排名")
     elif scan_limit is None and EXTRA_SCAN_QUOTA and new_analyzed_count < EXTRA_SCAN_QUOTA:
-        print(f"📖 本輪新解析 {new_analyzed_count} 個包（未達額度 {EXTRA_SCAN_QUOTA}）"
+        print(f"📖 本輪新解析 {new_analyzed_count} 個包（未達上限 {EXTRA_SCAN_QUOTA}）"
               f"——已經沒有更多沒掃過的檔案了，直接進排名")
     if untagged_count:
         print(f"🏷️ 另有 {untagged_count} 個包檔名裡沒有可用標籤：已解析並存進快取，"
@@ -279,8 +288,8 @@ def main(scan_limit=None, auto_next=True):
             print(f"⏳ 另有 {uncached_skipped_count} 個包快取裡還沒有資料，本輪未列入"
                   f"（再選一次『追加解析』就會繼續往下補）")
         else:
-            print(f"⏳ 另有 {uncached_skipped_count} 個包快取裡還沒有資料、掃描額度也已用完，"
-                  f"本輪未列入（想一併納入請調高 MAX_TARGET_FILES）")
+            print(f"⏳ 另有 {uncached_skipped_count} 個包快取裡還沒有資料、本輪解析額度已用完，"
+                  f"暫未列入（再跑一次就會繼續往下解析，想一次做多一點可調高 EXTRA_SCAN_QUOTA）")
     if lowgain_skipped_count:
         print(f"🏷️ 已略過 {lowgain_skipped_count} 個『試過但省太少』的壓縮包（resize.py --recheck 可重評）")
     if already_optimized_count:
@@ -327,7 +336,7 @@ def main(scan_limit=None, auto_next=True):
         })
 
     try:
-        with open(TARGETS_CACHE, 'w', encoding='utf-8') as f:
+        with open(TARGETS_CACHE, 'w', **TEXT_IO) as f:
             json.dump(targets_cache_data, f, ensure_ascii=False, indent=2)
         print("\n" + "=" * 65)
         print(f"💾 已將最新清單快取更新至: [{TARGETS_CACHE}]（共 {len(targets_cache_data)} 名，"
