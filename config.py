@@ -28,6 +28,10 @@ LOWGAIN_FLAG_FILE = BASE_DIR / "lowgain_skip.json"     # 「省太少而放棄�
 # 在搬移工具裡用關鍵字搜尋後，可以把那個關鍵字掛到搜到的檔案上。
 # 只記在這個檔案裡，不會更動任何檔名；清快取也不會刪它（這是人工輸入的資料）。
 MANUAL_TAG_FILE = BASE_DIR / "manual_tags.json"
+# 無標籤檔案的「切割規則」。預設用 - 切開檔名取第一段（ABC-BBB-CC.zip → ABC）。
+# accepted 是你在選單裡挑過、確認有意義的標籤：只有切出來的結果落在這份清單裡，
+# 新檔案才會自動歸位，免得日期、流水號那種切出來的雜訊也變成排行榜上的標籤。
+TAG_RULE_FILE = BASE_DIR / "tag_rules.json"
 
 # ================= 腳本名稱（階段串接用）=================
 MOVE_SCRIPT_NAME   = "moveToResize.py"

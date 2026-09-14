@@ -19,6 +19,7 @@ from config import (
     IGNORED_TAG_PATTERNS, TAG_SEPARATORS,
     JPEG_EXTENSIONS, JPEG_LARGE_KB, TARGET_PNG_RATIO, JPEG_PROBLEM_RATIO,
     JPEG_OPTIMIZED_SAMPLE_COUNT, LOWGAIN_FLAG_FILE, MANUAL_TAG_FILE,
+    TAG_RULE_FILE,
     QUALITY, JPEG_TARGET_QUALITY, JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO,
     JPEG_TARGET_SUBSAMPLING, MIN_ARCHIVE_SAVING_RATIO,
 )
@@ -141,6 +142,82 @@ def add_manual_tags(filenames, tag):
     return added
 
 
+# ================= 無標籤檔案的切割規則 =================
+# 檔名裡找不到標籤時，用「分隔符 + 第幾段」切出一個標籤（ABC-BBB-CC.zip → ABC）。
+# 只有切出來的結果在 accepted 清單裡才算數——那份清單是使用者在選單上挑過的，
+# 沒挑過的（日期、流水號那種）就維持無標籤，不會自己跑到排行榜上。
+DEFAULT_TAG_RULE = {'separator': '-', 'field': 1, 'accepted': []}
+_tag_rule_cache = None
+
+
+def load_tag_rule(force=False):
+    """讀取切割規則；讀不到就回傳預設值。"""
+    global _tag_rule_cache
+    if _tag_rule_cache is None or force:
+        rule = dict(DEFAULT_TAG_RULE)
+        if os.path.exists(TAG_RULE_FILE):
+            try:
+                with open(TAG_RULE_FILE, 'r', **TEXT_IO) as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    sep = loaded.get('separator')
+                    field = loaded.get('field')
+                    accepted = loaded.get('accepted')
+                    if isinstance(sep, str) and sep:
+                        rule['separator'] = sep
+                    if isinstance(field, int) and field >= 1:
+                        rule['field'] = field
+                    if isinstance(accepted, list):
+                        rule['accepted'] = [str(a) for a in accepted]
+            except Exception as e:
+                print(f"⚠️ 切割規則讀取失敗: {e}")
+        _tag_rule_cache = rule
+    return _tag_rule_cache
+
+
+def save_tag_rule(rule):
+    """寫回切割規則，並同步記憶體快取。"""
+    global _tag_rule_cache
+    try:
+        with open(TAG_RULE_FILE, 'w', **TEXT_IO) as f:
+            json.dump(rule, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 切割規則寫入失敗: {e}")
+        return False
+    _tag_rule_cache = dict(rule)
+    return True
+
+
+def rule_tag_from_name(filename, separator, field):
+    """依「分隔符 + 第幾段」從檔名切出標籤；切不出來回傳空字串。
+
+    檔名裡沒有這個分隔符就當規則不適用——否則每個檔案都會變成自己的標籤，
+    排行榜會被一堆只有一個檔案的項目淹掉。
+    """
+    stem = Path(filename).stem
+    if not separator or separator not in stem:
+        return ''
+    parts = [p.strip() for p in stem.split(separator)]
+    if field < 1 or field > len(parts):
+        return ''
+    return parts[field - 1]
+
+
+def accepted_rule_tag_for(filename):
+    """這個檔名用規則切出來的標籤，且必須是使用者採用過的才回傳。"""
+    rule = load_tag_rule()
+    accepted = rule.get('accepted') or []
+    if not accepted:
+        return ''
+    tag = rule_tag_from_name(filename, rule['separator'], rule['field'])
+    if not tag:
+        return ''
+    for a in accepted:
+        if a.lower() == tag.lower():
+            return a
+    return ''
+
+
 def extract_all_tags(filename):
     """從檔名的 []【】()（） 括號中抓出標籤，並濾掉雜訊關鍵字（大小寫無關）。
 
@@ -172,6 +249,12 @@ def extract_all_tags(filename):
                 continue
             seen.add(t_str.lower())
             clean_tags.append(t_str)
+
+    # 檔名裡找不到標籤時，才輪到切割規則；而且只認使用者採用過的結果
+    if not clean_tags:
+        auto = accepted_rule_tag_for(filename)
+        if auto:
+            clean_tags.append(auto)
 
     return clean_tags
 

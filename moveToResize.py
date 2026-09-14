@@ -14,7 +14,7 @@ from pathlib import Path
 
 from config import (
     SOURCE_DIR, TARGET_DIR, LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
-    RESIZE_SCRIPT_NAME, MANUAL_TAG_FILE, MIN_ARCHIVE_SIZE_MB, ESTIMATED_REDUCTION_RATE,
+    RESIZE_SCRIPT_NAME, MANUAL_TAG_FILE, TAG_RULE_FILE, MIN_ARCHIVE_SIZE_MB, ESTIMATED_REDUCTION_RATE,
     SHOW_TOP_N, RANK_PAGE_SIZE, EXTRA_ANALYZE_DEFAULT,
     ESTIMATED_JPG_REDUCTION_RATE, JPEG_PROBLEM_RATIO, ARCHIVE_EXTENSIONS,
 )
@@ -24,6 +24,7 @@ from common_utils import (
     get_archive_image_stats, stats_png_ratio, stats_large_jpg_ratio,
     is_slim_target, get_safe_destination, load_lowgain_flags, flag_key,
     add_manual_tags, TEXT_IO,
+    load_tag_rule, save_tag_rule, rule_tag_from_name,
 )
 
 
@@ -403,6 +404,107 @@ def run_extra_analysis():
     return True
 
 
+def rule_tag_wizard(src_path):
+    """無標籤檔案：用「分隔符 + 第幾段」切出標籤，看過再決定要不要採用。
+
+    採用的標籤會記進規則檔，之後新進來的無標籤檔案只要切出相同結果就自動歸位；
+    沒採用的（日期、流水號那種）維持無標籤，不會汙染排行榜。
+    """
+    rule = load_tag_rule()
+
+    sep_in = input(f"\n👉 用什麼分隔符切檔名？(Enter 用「{rule['separator']}」): ").strip()
+    separator = sep_in or rule['separator']
+
+    field_in = input(f"👉 取第幾段？(Enter 用第 {rule['field']} 段): ").strip()
+    if field_in:
+        if not field_in.isdigit() or int(field_in) < 1:
+            print("⚠️ 請輸入 1 以上的整數喵！")
+            return False
+        field = int(field_in)
+    else:
+        field = rule['field']
+
+    print(f"\n🔍 正在找無標籤的壓縮包，並用「{separator}」切第 {field} 段...")
+
+    groups = defaultdict(lambda: {'display': '', 'files': [], 'mb': 0.0})
+    untagged_total = 0
+    for file_path in list_archives(src_path):
+        if extract_all_tags(file_path.name):      # 已經有標籤（含規則已採用的）就不動它
+            continue
+        untagged_total += 1
+        tag = rule_tag_from_name(file_path.name, separator, field)
+        if not tag:
+            continue
+        g = groups[tag.lower()]
+        if not g['display']:
+            g['display'] = tag
+        g['files'].append(file_path.name)
+        g['mb'] += file_path.stat().st_size / (1024 * 1024)
+
+    if not groups:
+        print(f"💡 {untagged_total} 個無標籤的包裡，沒有一個切得出東西"
+              f"（檔名裡要有「{separator}」才算）喵！")
+        return False
+
+    results = sorted(groups.values(), key=lambda g: g['mb'], reverse=True)
+    cut_out = sum(len(g['files']) for g in results)
+
+    print("-" * 75)
+    print(f"📊 無標籤的包共 {untagged_total} 個，其中 {cut_out} 個切得出標籤，"
+          f"分成 {len(results)} 組（臨時排序，還沒生效）：")
+    print("-" * 75)
+    for idx, g in enumerate(results, start=1):
+        print(f" [{idx}] [{clean_str(g['display'])}] ── {len(g['files'])} 個檔案 | "
+              f"合計 {format_mb_or_gb(g['mb'])}")
+        print(f"        └─ 📄 {clean_str(g['files'][0])}")
+    print("-" * 75)
+    print(" [A] 全部採用")
+    print(" [1,3,5] 採用指定編號（逗號分隔）")
+    print(" [Q] 取消，什麼都不改")
+    print("-" * 75)
+
+    choice = input("👉 要採用哪些？: ").strip().upper()
+    if not choice or choice == 'Q':
+        print("💡 已取消，規則與標籤都沒有變動喵！")
+        return False
+
+    if choice == 'A':
+        chosen = results
+    else:
+        chosen = []
+        for part in choice.split(','):
+            part = part.strip()
+            if not part.isdigit() or not (1 <= int(part) <= len(results)):
+                print(f"⚠️ 無效的編號「{part}」，這次先不動喵！")
+                return False
+            chosen.append(results[int(part) - 1])
+
+    accepted = list(rule.get('accepted') or [])
+    accepted_lower = {a.lower() for a in accepted}
+    added_tags, added_files = 0, 0
+    for g in chosen:
+        if g['display'].lower() in accepted_lower:
+            continue
+        accepted.append(g['display'])
+        accepted_lower.add(g['display'].lower())
+        added_tags += 1
+        added_files += len(g['files'])
+
+    if not added_tags:
+        print("💡 這些標籤先前都已經採用過了喵！")
+        return False
+
+    if not save_tag_rule({'separator': separator, 'field': field, 'accepted': accepted}):
+        return False
+
+    print(f"\n🏷️ 已採用 {added_tags} 個標籤，涵蓋 {added_files} 個檔案"
+          f"（規則記在 {TAG_RULE_FILE.name}，檔名一個字都沒改）")
+    print(f"   規則：用「{separator}」切，取第 {field} 段")
+    print("   下次跑分析、或選 [E] 追加解析之後，排行榜就會反映出來；")
+    print("   之後新進來的無標籤檔案只要切出相同標籤，也會自動歸到同一組喵！")
+    return True
+
+
 def print_menu(targets):
     """印出主選單（含排行榜快取內容，若有）。
 
@@ -433,6 +535,7 @@ def print_menu(targets):
     print(" [0] 全域掃描所有符合條件的檔案")
     print(" [M] 手動輸入標籤進行精準比對")
     print(" [E] 追加解析 (指定筆數，補掃還沒解析過的壓縮包後重新排名)")
+    print(" [S] 無標籤檔案快速分類 (用分隔符切檔名，看過再決定採用哪些標籤)")
     print(" [C] 徹底清除所有舊快取檔 (包含黑名單與舊 Hash 快取)")
     print(" [Q] 離開")
     print("-" * 75)
@@ -515,6 +618,11 @@ def main():
 
         if user_choice == 'C':
             clear_all_caches()
+            print()
+            continue
+
+        if user_choice == 'S':
+            rule_tag_wizard(src_path)
             print()
             continue
 
