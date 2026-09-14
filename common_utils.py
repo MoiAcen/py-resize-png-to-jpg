@@ -274,6 +274,17 @@ def zip_has_work(file_path):
         return None
 
 
+def has_cached_stats(file_path, hash_cache):
+    """快取裡是否已有這個檔案可用的統計（版本相符）。
+
+    用來在開工前先算出「這輪有多少筆要更新」，不必真的去開檔。
+    """
+    key = get_file_hash_key(file_path)
+    if not key or key not in hash_cache:
+        return False
+    return hash_cache[key].get('v') == _STATS_CACHE_VERSION
+
+
 def get_archive_image_stats(file_path, hash_cache, cache_only=False):
     """只讀壓縮檔的檔頭清單，統計 PNG / JPG 容量帳。
 
