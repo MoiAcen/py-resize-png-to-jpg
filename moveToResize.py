@@ -15,7 +15,7 @@ from pathlib import Path
 from config import (
     SOURCE_DIR, TARGET_DIR, LOG_FILE, TARGETS_CACHE, HASH_CACHE_FILE,
     RESIZE_SCRIPT_NAME, MANUAL_TAG_FILE, TAG_RULE_FILE, MIN_ARCHIVE_SIZE_MB, ESTIMATED_REDUCTION_RATE,
-    SHOW_TOP_N, RANK_PAGE_SIZE, EXTRA_ANALYZE_DEFAULT,
+    SHOW_TOP_N, RANK_PAGE_SIZE, RULE_TAG_SHOW_N, EXTRA_ANALYZE_DEFAULT,
     ESTIMATED_JPG_REDUCTION_RATE, JPEG_PROBLEM_RATIO, ARCHIVE_EXTENSIONS,
 )
 from common_utils import (
@@ -449,18 +449,26 @@ def rule_tag_wizard(src_path):
     results = sorted(groups.values(), key=lambda g: g['mb'], reverse=True)
     cut_out = sum(len(g['files']) for g in results)
 
+    # 切出來的組別可能上百組，全列出來反而看不到重點，只看體積最大的前幾組
+    shown = results[:RULE_TAG_SHOW_N] if RULE_TAG_SHOW_N else results
+    rest = len(results) - len(shown)
+
     print("-" * 75)
     print(f"📊 無標籤的包共 {untagged_total} 個，其中 {cut_out} 個切得出標籤，"
           f"分成 {len(results)} 組（臨時排序，還沒生效）：")
+    if rest:
+        print(f"   以下只列體積最大的前 {len(shown)} 組，其餘 {rest} 組這次不列")
     print("-" * 75)
-    for idx, g in enumerate(results, start=1):
+    for idx, g in enumerate(shown, start=1):
         print(f" [{idx}] [{clean_str(g['display'])}] ── {len(g['files'])} 個檔案 | "
               f"合計 {format_mb_or_gb(g['mb'])}")
         print(f"        └─ 📄 {clean_str(g['files'][0])}")
     print("-" * 75)
-    print(" [A] 全部採用")
+    print(f" [A] 採用上列 {len(shown)} 組")
     print(" [1,3,5] 採用指定編號（逗號分隔）")
     print(" [Q] 取消，什麼都不改")
+    if rest:
+        print(f" 💡 採用之後再進來一次，沒列到的 {rest} 組就會遞補上來")
     print("-" * 75)
 
     choice = input("👉 要採用哪些？: ").strip().upper()
@@ -469,15 +477,15 @@ def rule_tag_wizard(src_path):
         return False
 
     if choice == 'A':
-        chosen = results
+        chosen = shown
     else:
         chosen = []
         for part in choice.split(','):
             part = part.strip()
-            if not part.isdigit() or not (1 <= int(part) <= len(results)):
+            if not part.isdigit() or not (1 <= int(part) <= len(shown)):
                 print(f"⚠️ 無效的編號「{part}」，這次先不動喵！")
                 return False
-            chosen.append(results[int(part) - 1])
+            chosen.append(shown[int(part) - 1])
 
     accepted = list(rule.get('accepted') or [])
     accepted_lower = {a.lower() for a in accepted}

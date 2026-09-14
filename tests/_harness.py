@@ -54,7 +54,7 @@ class Sandbox:
         names = _REDIRECTED_PATHS + (
             'SOURCE_DIR', 'TARGET_DIR', 'FAILED_DIR', 'DONE_DIR',
             'MIN_ARCHIVE_SIZE_MB', 'MAX_TARGET_FILES', 'EXTRA_SCAN_QUOTA',
-            'SHOW_TOP_N', 'SAVE_RANK_N', 'RANK_PAGE_SIZE',
+            'SHOW_TOP_N', 'SAVE_RANK_N', 'RANK_PAGE_SIZE', 'RULE_TAG_SHOW_N',
             'EXTRA_ANALYZE_DEFAULT', 'MIN_ARCHIVE_SAVING_RATIO',
             'IGNORED_TAG_KEYS', 'JPEG_LARGE_KB',
         )

@@ -108,6 +108,25 @@ def main():
         c.check(by_tag.get('ABC') == 2, f'排行榜出現 ABC（2 個檔案）: {by_tag.get("ABC")}')
         c.check('2024' not in by_tag and 'XYZ' not in by_tag, '沒採用的不會跑到排行榜上')
 
+        c.section('組別太多時只列前 N 組')
+        config.RULE_TAG_SHOW_N = mv.RULE_TAG_SHOW_N = 2
+        for i in range(4):
+            make_png_zip(sb.src / f'G{i}-part-{i}.zip', seed=50 + i)
+        feed_input(mv, ['', '', 'Q'])
+        out, _ = capture(mv.rule_tag_wizard, sb.src)
+        listing = out.split('[A] 採用上列')[0]
+        c.check(listing.count('個檔案 |') == 2, f'只列 2 組（實際 {listing.count("個檔案 |")}）')
+        c.check('其餘' in out and '組這次不列' in out, '有說明還有幾組沒列出來')
+        c.check('採用之後再進來一次' in out, '有告訴使用者沒列到的會遞補')
+        c.check('[A] 採用上列 2 組' in out, '[A] 的文字與實際列出的組數一致')
+
+        feed_input(mv, ['', '', '3'])
+        out, ok = capture(mv.rule_tag_wizard, sb.src)
+        c.check(not ok and '無效的編號' in out, '超過列出範圍的編號會被擋下來')
+        config.RULE_TAG_SHOW_N = mv.RULE_TAG_SHOW_N = 30
+        for i in range(4):
+            (sb.src / f'G{i}-part-{i}.zip').unlink()
+
         c.section('第二次進來：分隔符記住了，已採用的不重複加')
         feed_input(mv, ['', '', 'A'])
         out, ok = capture(mv.rule_tag_wizard, sb.src)
