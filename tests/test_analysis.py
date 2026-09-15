@@ -74,7 +74,7 @@ def main():
             f.unlink(missing_ok=True)
         out = run(cap=1, quota=0)
         c.check(out.count('🔍新解析') == 1, '抓滿 1 個潛力包就停止讀新檔')
-        c.check('已抓滿 1 個高潛力爆發包' in out, '有說明是抓滿潛力包而停')
+        c.check('本輪已解析出 1 個高潛力爆發包' in out, '有說明是本輪解析出的潛力包夠了而停')
 
         c.section('排行榜不該被掃描順序截斷')
         c.check(len(ranked_tags()) >= 1, '掃描上限之後，快取已知的包仍然納入統計')
