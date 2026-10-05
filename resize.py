@@ -21,7 +21,7 @@ from pathlib import Path
 from PIL import Image
 
 from config import (
-    TARGET_DIR, FAILED_DIR, DONE_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
+    TARGET_DIR, FAILED_DIR, DONE_DIR, TEMP_WORK_DIR, QUALITY, AUTO_DELETE_ORIGINAL, OVERWRITE_EXISTING_ZIP,
     MAX_WORKERS, ARCHIVE_EXTENSIONS, JPEG_EXTENSIONS, JPEG_FIX_MODE,
     JPEG_TARGET_QUALITY, JPEG_TARGET_SUBSAMPLING,
     JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO, JPEG_CONTENT_SAMPLE_SIZE,
@@ -525,6 +525,32 @@ def process_jpegs_auto(jpg_files, pool):
     return fixed
 
 
+def prepare_temp_work_base(target_path):
+    """決定並建立暫存工作區，回傳可用的路徑。
+
+    解壓與轉檔的寫入量都落在這裡，所以允許指到另一顆 SSD 分攤損耗。
+    指定的路徑建不起來或不可寫時退回 TARGET_DIR——這只是暫存位置，
+    不值得為它讓整批轉檔中斷。
+    """
+    if TEMP_WORK_DIR:
+        candidate = Path(TEMP_WORK_DIR) / "_temp_work"
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            # 真的寫一個檔案確認可寫，光是 mkdir 成功不代表寫得進去
+            probe = candidate / '.write_test'
+            probe.write_bytes(b'ok')
+            probe.unlink()
+            print(f"💾 暫存工作區: [{candidate}]（與收藏庫分開，分攤寫入損耗）")
+            return candidate
+        except Exception as e:
+            print(f"⚠️ 指定的暫存工作區 [{TEMP_WORK_DIR}] 無法使用 ({e})，"
+                  f"改用 [{target_path}] 底下喵！")
+
+    fallback = target_path / "_temp_work"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
 def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=False):
     """處理單一壓縮包：解壓 → 轉檔 → 重打包 → 驗收替換。
 
@@ -739,9 +765,8 @@ def main():
         print(f"❌ [{TARGET_DIR}] 下沒有找到任何壓縮檔喵！")
         return
 
-    # 建立短路徑暫存資料夾
-    temp_work_base = target_path / "_temp_work"
-    temp_work_base.mkdir(parents=True, exist_ok=True)
+    # 建立短路徑暫存資料夾（可用 TEMP_WORK_DIR 指到另一顆 SSD 分攤寫入損耗）
+    temp_work_base = prepare_temp_work_base(target_path)
 
     total_cpus = os.cpu_count() or 8
     print("========================================")
