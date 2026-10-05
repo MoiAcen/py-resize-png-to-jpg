@@ -40,6 +40,7 @@ def main():
     c.section('指定到另一個位置（模擬另一顆 SSD）')
     with Sandbox() as sb:
         other = sb.root / 'other_ssd'
+        c.check(not other.exists(), '前提：指定的位置事先並不存在（不需要使用者先建）')
         config.TEMP_WORK_DIR = str(other)
         import resize
         sb.sync(resize)
@@ -51,7 +52,7 @@ def main():
         c.check('暫存工作區' in out and str(other) in out, 'log 有說暫存區在哪裡')
         c.check(not (sb.work / '_temp_work').exists(), '沒有在工作區底下留下暫存資料夾')
         c.check(not (other / '_temp_work').exists(), '跑完有清掉指定位置下的暫存資料夾')
-        c.check(other.exists(), '指定的根目錄本身保留（那是使用者指定的位置）')
+        c.check(other.exists(), '工具自己把不存在的位置建出來，且跑完保留它（那是使用者指定的位置）')
         c.check(list(sb.src.glob('*.zip')) or list(sb.work.glob('*.zip')), '壓縮包仍然產出')
 
     c.section('內容正確性不受暫存區位置影響')
