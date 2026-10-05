@@ -43,6 +43,7 @@ class Sandbox:
         config.TARGET_DIR = str(self.work)
         config.FAILED_DIR = str(self.failed)
         config.DONE_DIR = ''
+        config.TEMP_WORK_DIR = None
         config.MIN_ARCHIVE_SIZE_MB = 0
         for name in _REDIRECTED_PATHS:
             setattr(config, name, self.root / f'{name.lower()}.dat')
@@ -52,7 +53,7 @@ class Sandbox:
     def sync(self, *modules):
         """把改過的 config 值同步到已經 import 的模組（它們複製走的是舊值）。"""
         names = _REDIRECTED_PATHS + (
-            'SOURCE_DIR', 'TARGET_DIR', 'FAILED_DIR', 'DONE_DIR',
+            'SOURCE_DIR', 'TARGET_DIR', 'FAILED_DIR', 'DONE_DIR', 'TEMP_WORK_DIR',
             'MIN_ARCHIVE_SIZE_MB', 'MAX_TARGET_FILES', 'EXTRA_SCAN_QUOTA',
             'SHOW_TOP_N', 'SAVE_RANK_N', 'RANK_PAGE_SIZE', 'RULE_TAG_SHOW_N',
             'EXTRA_ANALYZE_DEFAULT', 'MIN_ARCHIVE_SAVING_RATIO',

@@ -69,7 +69,9 @@ def main(scan_limit=None, auto_next=True):
     print("========================================")
     print("⚡ 實體硬碟空間推演分析器 (Binary 二進制快取加速版) 啟動喵！")
     print(f"📂 快取檔: [{HASH_CACHE_FILE}] | 已載入 {len(hash_cache)} 筆 Binary 記憶體快取")
-    print(f"🎯 鎖定目標: 抓滿 {MAX_TARGET_FILES} 個『內部 PNG 佔比 >= {int(TARGET_PNG_RATIO * 100)}%』的爆發包")
+    print(f"🎯 鎖定目標: 每輪解析出 {MAX_TARGET_FILES} 個"
+          f"『內部 PNG 佔比 >= {int(TARGET_PNG_RATIO * 100)}%』的爆發包就先收工"
+          f"（快取命中不佔額度）")
     if EXTRA_SCAN_QUOTA and scan_limit is None:
         print(f"🧮 每輪最多新解析 {EXTRA_SCAN_QUOTA} 個包；掃到就先出排行榜，下一輪繼續往下")
     print("========================================\n")
@@ -118,9 +120,9 @@ def main(scan_limit=None, auto_next=True):
     def scan_budget_exhausted():
         """還能不能再開新檔案。
 
-        兩個條件任一成立就停：本輪新解析的筆數到頂，或潛力包已經抓滿。
-        （這裡必須是「或」——寫成「且」的話，因為 MAX_TARGET_FILES 實際上
-        很難抓滿，筆數上限等於永遠不會生效，整個收藏庫會被一次掃完。）
+        兩個條件任一成立就停：本輪新解析的筆數到頂，或本輪解析出的潛力包夠多了。
+        兩者都只看「這一輪實際做的工」——快取命中是免費的，不佔任何額度。
+        （必須是「或」；寫成「且」的話其中一邊就等於永遠不生效。）
         """
         limit = scan_limit if scan_limit is not None else EXTRA_SCAN_QUOTA
         if limit and new_analyzed_count >= limit:
@@ -139,7 +141,7 @@ def main(scan_limit=None, auto_next=True):
                       f"接下來不再開新檔案，快取裡已知的包仍會納入排行榜；"
                       f"再跑一次就會從沒掃過的繼續往下喵！")
             else:
-                print(f"\n🎉 已抓滿 {MAX_TARGET_FILES} 個高潛力爆發包！"
+                print(f"\n🎉 本輪已解析出 {MAX_TARGET_FILES} 個高潛力爆發包！"
                       f"接下來不再開新檔案，但快取裡已知的包仍會納入排行榜喵！")
 
         # 跳過黑名單與紀錄檔本身（以小寫檔名比對）
@@ -229,8 +231,11 @@ def main(scan_limit=None, auto_next=True):
         display_tag = clean_str(tags[0]) if tags else '無標籤'
 
         if png_ratio >= TARGET_PNG_RATIO:
-            target_found_count += 1
+            # 只算「這輪真的去解析出來」的潛力包。快取命中是免費的，
+            # 讓它計入的話，光是讀舊資料就能把額度吃光，於是一輪下來
+            # 半個新檔案都沒開，待解析的包永遠停在原地。
             if is_new_scan:
+                target_found_count += 1
                 print(
                     f"🔥 [🔍新解析 第 {new_analyzed_count} 筆] "
                     f"[{display_tag}] -> {clean_str(file_path.name)} "
