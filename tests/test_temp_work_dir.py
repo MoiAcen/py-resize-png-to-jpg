@@ -25,7 +25,7 @@ def run_resize(resize, record):
 def main():
     c = Checker('暫存工作區位置')
 
-    c.section('預設：開在 TARGET_DIR 底下（舊行為）')
+    c.section('沒填（None）：開在 TARGET_DIR 底下（舊行為）')
     with Sandbox() as sb:
         import resize
         sb.sync(resize)

@@ -23,13 +23,14 @@ DONE_DIR   = r"U:\CG"                  # 處理完成的壓縮包搬回這裡(�
 #
 # 這裡填的是「位置」，不是資料夾本身：工具會在這個位置底下自己建立 _temp_work，
 # 用完自己刪掉，所以不用事先建好任何東西（填的位置不存在也會一併建出來）。
-#   TEMP_WORK_DIR = r"D:\pyresize_tmp"  →  實際使用 D:\pyresize_tmp\_temp_work
+#   TEMP_WORK_DIR = r"I:\resizetemp"  →  實際使用 I:\resizetemp\_temp_work
 # 工具只會刪它自己建的 _temp_work，你填的這個位置本身會保留。
 #
-# 沒填（None 或 ""）就維持原本行為：建在 TARGET_DIR 底下的 _temp_work。
-# 路徑建不起來或不可寫時也會自動退回這個位置，不會讓整批轉檔中斷。
+# 設成 None 或 "" 就維持原本行為：建在 TARGET_DIR 底下的 _temp_work。
+# 路徑建不起來或不可寫時（例如那顆磁碟沒接上）也會自動退回這個位置，
+# 並印出警告，不會讓整批轉檔中斷。
 # 建議給「短」路徑：暫存區同時也是繞過 Windows 260 字元路徑限制的手段。
-TEMP_WORK_DIR = None                   # 例: r"D:\pyresize_tmp"
+TEMP_WORK_DIR = r"I:\resizetemp"        # 實際使用 I:\resizetemp\_temp_work
 
 # ================= 快取 / 紀錄檔（絕對路徑）=================
 LOG_FILE        = BASE_DIR / "analysis.bin"            # 無 PNG 黑名單
