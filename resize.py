@@ -635,6 +635,9 @@ def slim_single_archive(archive_path, pool, temp_work_base, flags=None, recheck=
         base_filename, _ = os.path.splitext(archive_path)
         ideal_zip_path = f"{base_filename}.zip"
         final_zip_path = get_safe_output_path(ideal_zip_path, current_archive_path=archive_path)
+        # 刻意留在原壓縮包旁邊，不跟著 TEMP_WORK_DIR 搬到別顆磁碟（使用者已決定不搬）。
+        # 最後是用 os.rename 瞬間換名；os.rename 不能跨磁碟，要搬就得改成 shutil.move，
+        # 變成整包多複製一次，失敗時的殘留狀態也不同——取捨不划算，別再提議。
         temp_output_zip = f"{base_filename}_temp_processing.zip"
 
         final_files_to_pack = [f for f in temp_dir_path.glob("**/*") if f.is_file()]
