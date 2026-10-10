@@ -272,6 +272,21 @@ def write_failed_report(dst_path, failed_members, err_msg):
         return False
 
 
+def to_rgb(img):
+    """轉成 JPEG 能存的 RGB，並避開 Pillow 對調色盤透明度的警告。
+
+    帶有「逐項透明度」(tRNS) 的調色盤圖，直接 convert('RGB') 會讓 Pillow 發出
+    UserWarning，而且每個轉檔 worker 行程都各印一遍，把畫面洗滿。照警告的建議先轉
+    RGBA 再轉 RGB 即可：丟掉透明度的方式與以前完全相同（JPEG 本來就沒有透明度），
+    像素與直接轉 RGB 一致，只是不再發警告。
+    """
+    if img.mode == 'RGB':
+        return img
+    if img.mode == 'P' and 'transparency' in img.info:
+        img = img.convert('RGBA')
+    return img.convert('RGB')
+
+
 def claim_jpg_path(png_path):
     """為一張 PNG 佔下不會撞名的 .jpg 輸出路徑，回傳 (路徑, 是否撞名改名)。
 
@@ -317,8 +332,7 @@ def convert_single_image_worker(args):
         jpg_path, collided = claim_jpg_path(img_path)
 
         with Image.open(img_path) as img:
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
+            img = to_rgb(img)
 
             img.save(jpg_path, format='JPEG', quality=quality, optimize=True)
 
@@ -414,16 +428,14 @@ def _encode(im, quality, subsampling):
 def _recompress_bytes(img_path, quality, subsampling):
     """B：以指定品質重壓，回傳新位元組。"""
     with Image.open(img_path) as im:
-        if im.mode != 'RGB':
-            im = im.convert('RGB')
+        im = to_rgb(im)
         return _encode(im, quality, subsampling)
 
 
 def _recompress_auto(img_path, subsampling):
     """B：依內容自動挑品質後重壓，回傳 (位元組, 品質, 類型)。"""
     with Image.open(img_path) as im:
-        if im.mode != 'RGB':
-            im = im.convert('RGB')
+        im = to_rgb(im)
         quality, _ratio, kind = pick_quality_for(im)
         return _encode(im, quality, subsampling), quality, kind
 
