@@ -8,7 +8,7 @@
     python jpeg_efficiency.py <輸入> [--samples 30] [--pick random|largest]
                                       [--qualities 70,80,85,90,92,95] [--out 資料夾]
 
-<輸入> 可以是：單一 .jpg / 資料夾 / .zip 壓縮包
+<輸入> 可以是：單一 .jpg / 資料夾 / .zip / .rar / .7z 壓縮包（rar 與 7z 需要 7-Zip）
 
 產出（預設在 jpeg_efficiency_out/）：
     jpeg_efficiency.html   圖表報告（雙擊用瀏覽器開，內嵌 SVG，不需要網路）
@@ -26,7 +26,9 @@ import io
 import math
 import os
 import random
+import re
 import shutil
+import subprocess
 import statistics
 import sys
 import tempfile
@@ -42,7 +44,7 @@ from config import (
     JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO, JPEG_TARGET_SUBSAMPLING,
     MIN_ARCHIVE_SAVING_RATIO, MAX_WORKERS, TEMP_WORK_DIR,
 )
-from common_utils import clean_str
+from common_utils import clean_str, list_7z_entries, SEVEN_ZIP_PATH
 from jpeg_inspector import inspect_jpeg, classify_jpeg
 from quality_test import psnr
 import resize   # 沿用正式流程的編碼，量到的就是 resize.py 實際會產生的結果
@@ -52,6 +54,8 @@ THUMB_EDGE = 180
 PNG_TYPICAL_SAVING = 0.90      # 使用者觀察到的 PNG→JPG 常見縮減，圖上畫成參考線
 MAX_FAINT_LINES = 60           # 逐檔細線最多畫幾條，免得 SVG 肥到打不開
 TABLE_ROWS = 200
+SEVEN_ZIP_SUFFIXES = ('.rar', '.7z')   # 這兩種交給 7-Zip；.zip 用 Python 內建的 zipfile
+MAX_CMD_CHARS = 16000                  # 一次 7z 指令的成員名稱總長上限，Windows 命令列約 32k 字元
 
 
 # ================= 取樣 =================
@@ -74,6 +78,74 @@ def _pick(items, count, how, seed):
     if how == 'largest':
         return sorted(items, key=lambda it: it[0], reverse=True)[:count]
     return random.Random(seed).sample(items, count)
+
+
+def _chunks_by_chars(items, limit=MAX_CMD_CHARS):
+    """把名稱依總字元數分批，每批不超過 limit，順序不變。單一名稱再長也自成一批。"""
+    batch, size = [], 0
+    for it in items:
+        if batch and size + len(it) + 1 > limit:
+            yield batch
+            batch, size = [], 0
+        batch.append(it)
+        size += len(it) + 1
+    if batch:
+        yield batch
+
+
+def _member_disk_path(workdir, member):
+    """7-Zip 解出來的路徑：保留壓縮包內的資料夾結構，分隔符不分 Windows / Unix 一律處理。"""
+    return Path(workdir).joinpath(*[p for p in re.split(r'[\\/]', member) if p])
+
+
+def _samples_from_7z(p, count, how, seed, min_kb, workdir):
+    """rar / 7z：先列清單挑出 JPG，再只把被挑中的成員解出來，原檔不動。"""
+    exe = SEVEN_ZIP_PATH
+    if not exe:
+        print(f"❌ 讀取 {p.suffix} 需要 7-Zip，但找不到。請安裝 7-Zip，"
+              "或在 config.py 的 POSSIBLE_7Z_PATHS 補上它的路徑。")
+        return []
+    listing = list_7z_entries(p, exe)
+    if listing is None:
+        print(f"❌ 7-Zip 打不開這個壓縮包（損毀、加密或格式不支援）：{p.name}")
+        return []
+
+    min_bytes = max(0, min_kb) * 1024
+    members = [(size, name) for name, size in listing['entries']
+               if name.lower().endswith(JPEG_EXTENSIONS) and size >= min_bytes]
+    if not members:
+        print(f"❌ 壓縮包裡沒有 >= {min_kb} KB 的 JPG：{p.name}")
+        return []
+
+    chosen = _pick(members, count, how, seed)
+    total_mb = sum(size for size, _n in chosen) / 1024 / 1024
+    print(f"📦 {p.name}：共 {len(members)} 張符合條件的 JPG，抽 {len(chosen)} 張"
+          f"（約 {total_mb:.0f} MB）解出來測試...")
+    if listing['solid']:
+        print("   ⚠️ 這是 solid 壓縮包：要抽出指定成員，7-Zip 得把前面的內容也解碼過一遍，"
+              "大的包會比較慢，請耐心等候。")
+
+    names = [name for _s, name in chosen]
+    for batch in _chunks_by_chars(names):
+        try:
+            # `--` 之後一律當檔名：成員名稱若以 - 開頭才不會被誤認成參數。
+            # stdin 接 DEVNULL：遇到加密檔時 7z 會等密碼輸入，不接上它整支程式就卡住。
+            subprocess.run([exe, 'x', str(p), f'-o{workdir}', '-y', '--', *batch],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           stdin=subprocess.DEVNULL, timeout=3600)
+        except Exception as e:
+            print(f"   ⚠️ 解壓其中一批時出錯：{e}")
+
+    out, missing = [], 0
+    for name in names:
+        disk = _member_disk_path(workdir, name)
+        if disk.is_file():
+            out.append((name, disk))
+        else:
+            missing += 1
+    if missing:
+        print(f"   ⚠️ 有 {missing} 張沒能解出來，已略過")
+    return out
 
 
 def collect_samples(input_path, count, how, seed, min_kb, workdir):
@@ -105,6 +177,9 @@ def collect_samples(input_path, count, how, seed, min_kb, workdir):
         except Exception as e:
             print(f"❌ 讀取壓縮包失敗：{e}")
             return []
+
+    if p.is_file() and p.suffix.lower() in SEVEN_ZIP_SUFFIXES:
+        return _samples_from_7z(p, count, how, seed, min_kb, workdir)
 
     if p.is_file():
         if p.suffix.lower() not in JPEG_EXTENSIONS:
@@ -763,7 +838,7 @@ def print_summary(rows, summary, qualities, html_path, csv_path):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description='JPG 重壓效率研究：實測各品質能省多少、畫質代價、分流是否有作用（輸入唯讀）')
-    parser.add_argument('input', help='單一 .jpg / 資料夾 / .zip')
+    parser.add_argument('input', help='單一 .jpg / 資料夾 / .zip / .rar / .7z')
     parser.add_argument('--samples', type=int, default=30, help='抽測幾張（預設 30）')
     parser.add_argument('--pick', choices=('random', 'largest'), default='random',
                         help='怎麼挑：random 隨機（預設，較有代表性）/ largest 挑最大的')

@@ -389,6 +389,61 @@ def find_7z():
 SEVEN_ZIP_PATH = find_7z()
 
 
+def list_7z_entries(archive_path, seven_zip=None, timeout=120):
+    """用 `7z l -slt` 列出壓縮包裡的檔案（不含資料夾）與解壓後大小。
+
+    回傳 {'entries': [(成員路徑, 大小), ...], 'solid': bool}；7-Zip 不存在、
+    打不開或逾時就回傳 None。-slt 是「一個成員一個區塊」的格式，檔名有空白、
+    括號、非 ASCII 都不會被切壞，比解析固定欄位的表格可靠。
+    """
+    exe = seven_zip or SEVEN_ZIP_PATH
+    if not exe:
+        return None
+    try:
+        res = subprocess.run([exe, "l", "-slt", str(archive_path)],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             stdin=subprocess.DEVNULL, text=True, errors='replace',
+                             timeout=timeout)
+    except Exception:
+        return None
+    if res.returncode != 0:
+        return None
+
+    entries, solid, in_entries, block = [], False, False, {}
+
+    def flush():
+        path = block.get('Path')
+        if path is None:
+            return
+        if 'Folder' in block:                 # 有 Folder 欄就以它為準
+            is_dir = block['Folder'].strip() == '+'
+        else:                                 # 7z 格式沒有 Folder 欄，改看屬性的第一個字
+            attrs = block.get('Attributes', '').split()
+            is_dir = bool(attrs) and attrs[0].upper().startswith('D')
+        if not is_dir:
+            try:
+                entries.append((path, int(block.get('Size', '0') or 0)))
+            except ValueError:
+                pass
+
+    for raw in res.stdout.splitlines():
+        line = raw.rstrip()
+        if not in_entries:
+            if line.startswith('Solid = '):
+                solid = line[8:].strip() == '+'
+            if line.startswith('----------'):     # 這行之後才是各個成員，之前是壓縮包本身的資訊
+                in_entries = True
+            continue
+        if line == '':
+            flush()
+            block = {}
+        elif ' = ' in line:
+            key, _, value = line.partition(' = ')
+            block[key] = value
+    flush()
+    return {'entries': entries, 'solid': solid}
+
+
 # ================= 壓縮包影像帳（核心）=================
 # 快取簽章：把「格式版本 + 會影響統計結果的門檻」一起編進 key。
 # 任一門檻改變（例如調整 JPEG_LARGE_KB / MIN_SINGLE_PNG_KB）時，舊快取自動

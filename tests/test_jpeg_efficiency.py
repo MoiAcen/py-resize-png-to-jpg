@@ -196,7 +196,106 @@ def main():
         out, got = capture(je.collect_samples, str(lib / 'ignored.png'), 1, 'random', 1, 0, work)
         c.check(got == [] and '不是 JPG' in out, '指到非 JPG 檔時說明並回傳空清單')
 
-        # ---------- 9. 參數檢查 ----------
+        # ---------- 9. rar / 7z（透過 7-Zip）----------
+        import common_utils as cu
+        import subprocess
+        from _rar import make_rar5
+        c.section('rar / 7z：用 7-Zip 列清單、只解出被挑中的 JPG')
+        if not cu.SEVEN_ZIP_PATH:
+            print('  (本機沒有 7-Zip，跳過這一組)')
+        else:
+            payloads = {
+                'sub/photo_big.jpg': p_q99.read_bytes(),
+                'photo_small.jpg': f_q95.read_bytes(),
+                '-dash name.jpg': p_q95.read_bytes(),             # 開頭是 - ，不加 -- 會被當成參數
+                '角色 [Patreon] 01.jpg': p_prog.read_bytes(),      # 中文 + 方括號 + 空白
+                'note.txt': b'not an image' * 20,                  # 不是 JPG
+            }
+            rar = make_rar5(sb.root / 'pack.rar',
+                            [('emptydir/', b'')] + list(payloads.items()))      # 含資料夾項目
+            rar_before = md5(rar)
+
+            listing = cu.list_7z_entries(rar)
+            c.check(listing is not None and not listing['solid'], '7-Zip 讀得懂這個 rar（Rar5，非 solid）')
+            names = {n for n, _s in listing['entries']}
+            c.check(names == set(payloads), f'清單只含檔案、不含資料夾項目: {sorted(names)}')
+            c.check(dict(listing['entries']) == {k: len(v) for k, v in payloads.items()},
+                    '每個成員的大小與原始內容一致')
+
+            work2 = sb.root / 'rwork'
+            work2.mkdir()
+            got = je.collect_samples(str(rar), 100, 'random', 1, 0, work2)
+            c.check(sorted(n for n, _ in got) == sorted(k for k in payloads if k.endswith('.jpg')),
+                    '四張 JPG 都挑到，note.txt 不算')
+            same = all(md5(path) == hashlib.md5(payloads[n]).hexdigest() for n, path in got)
+            c.check(same, '解出來的每個 JPG 與原始位元組完全相同（含中文、方括號、開頭是 - 的檔名）')
+            c.check(any('/' in n for n, _ in got) and (work2 / 'sub').is_dir(),
+                    '壓縮包內的子資料夾結構有保留')
+            c.check(md5(rar) == rar_before, 'rar 原檔沒被動到')
+
+            work3 = sb.root / 'rwork2'
+            work3.mkdir()
+            got = je.collect_samples(str(rar), 2, 'largest', 1, 0, work3)
+            c.check(sorted(n for n, _ in got) == sorted(['sub/photo_big.jpg', '-dash name.jpg']),
+                    f'largest 挑到最大的 2 張: {[n for n, _ in got]}')
+            extracted = [f for f in work3.rglob('*') if f.is_file()]
+            c.check(len(extracted) == 2, f'只解出被挑中的 2 張，不是整包（解出 {len(extracted)} 個）')
+
+            out, got = capture(je.collect_samples, str(rar), 100, 'random', 1, 10_000, sb.root / 'rwork3')
+            c.check(got == [] and '沒有 >= 10000 KB' in out, '--min-kb 對 rar 也有效')
+
+            out, rc = capture(je.main, [str(rar), '--min-kb', '0', '--samples', '10', '--workers', '2',
+                                        '--qualities', '80,92', '--out', str(sb.root / 'rout')])
+            c.check(rc == 0, '整個流程從 rar 一路跑到出報告')
+            rrows = {r['name']: r for r in csv.DictReader(
+                open(sb.root / 'rout' / 'jpeg_efficiency.csv', encoding='utf-8-sig'))}
+            c.check(set(rrows) == {'sub/photo_big.jpg', 'photo_small.jpg', '-dash name.jpg',
+                                   '角色 [Patreon] 01.jpg'}, f'CSV 的檔名保留壓縮包內的路徑: {sorted(rrows)}')
+            c.check(all(r['error'] == '' for r in rrows.values()), '四張都分析成功')
+            c.check(md5(rar) == rar_before, '跑完整個流程後 rar 仍然沒被動到')
+
+            # .7z 也走同一條路徑；7z 預設就是 solid，要提示會比較慢
+            z7 = sb.root / 'pack.7z'
+            subprocess.run([cu.SEVEN_ZIP_PATH, 'a', str(z7), str(p_q95), str(f_q95)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            out, got = capture(je.collect_samples, str(z7), 10, 'random', 1, 0, sb.root / 'zwork7')
+            c.check(len(got) == 2 and all(path.read_bytes() == (p_q95 if n == p_q95.name else f_q95).read_bytes()
+                                          for n, path in got), '.7z 也能挑、能解，位元組一致')
+            c.check('solid' in out, 'solid 壓縮包會提示解指定成員比較慢')
+
+            bad = sb.root / 'garbage.rar'
+            bad.write_bytes(b'this is not a rar' * 50)
+            out, got = capture(je.collect_samples, str(bad), 5, 'random', 1, 0, sb.root / 'bw')
+            c.check(got == [] and '打不開' in out, '損毀的 rar：說明原因並回傳空清單，不當機')
+
+        c.section('沒有 7-Zip 時：說清楚怎麼辦')
+        # 用一個確實存在的檔案：不存在的話會先被「找不到輸入」攔下，測不到 7-Zip 缺失的分支
+        stub_rar = sb.root / 'stub.rar'
+        stub_rar.write_bytes(b'placeholder')
+        saved = je.SEVEN_ZIP_PATH
+        je.SEVEN_ZIP_PATH = None
+        try:
+            out, got = capture(je.collect_samples, str(stub_rar), 5, 'random', 1, 0, sb.root / 'nw')
+        finally:
+            je.SEVEN_ZIP_PATH = saved
+        c.check(got == [] and '需要 7-Zip' in out and 'POSSIBLE_7Z_PATHS' in out,
+                '找不到 7-Zip：說明原因，並指出要在哪裡設定路徑')
+
+        c.section('分批與路徑小工具（純函式）')
+        items = [f'file_{i:03d}.jpg' for i in range(50)]
+        batches = list(je._chunks_by_chars(items, limit=100))
+        c.check([x for b in batches for x in b] == items, '分批後順序不變、一個不漏、一個不重')
+        c.check(all(sum(len(x) + 1 for x in b) <= 100 for b in batches) and len(batches) > 1,
+                '每批的總長度都不超過上限，且確實分成多批')
+        c.check(list(je._chunks_by_chars(['x' * 500], limit=100)) == [['x' * 500]],
+                '單一名稱超過上限時自成一批，不會卡住')
+        c.check(list(je._chunks_by_chars([], limit=100)) == [], '空清單不會出問題')
+        wd = sb.root / 'wd'
+        c.check(je._member_disk_path(wd, 'a/b/c.jpg') == wd / 'a' / 'b' / 'c.jpg', 'Unix 分隔符')
+        c.check(je._member_disk_path(wd, 'a\\b\\c.jpg') == wd / 'a' / 'b' / 'c.jpg',
+                'Windows 分隔符也能正確拆開')
+
+        # ---------- 10. 參數檢查 ----------
         c.section('參數檢查')
         out, rc = capture(je.main, [str(p_q95), '--qualities', 'abc', '--out', str(sb.root / 'o3')])
         c.check(rc == 1 and '格式錯誤' in out, '品質格式錯誤會擋下來')
