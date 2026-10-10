@@ -232,3 +232,7 @@ manual_tags.json
 
 # 無標籤檔案的切割規則 (TAG_RULE_FILE)
 tag_rules.json
+
+# 研究/驗證工具的輸出資料夾
+jpeg_efficiency_out/
+quality_test_out/

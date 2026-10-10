@@ -26,6 +26,7 @@ python tests/test_tags.py            # 單獨跑一組
 | `test_tagging_flows.py` | 三條歸類流程：`[F]`→`[T]` 關鍵字標籤、`[S]` 切割規則精靈、`[T]` 直接加入標籤（自訂名稱、重新標記是取代、各種不該動手的情況），含「不得更動檔名」與「不觸發重新解析」 |
 | `test_convert.py` | PNG 轉檔不得蓋掉同名 JPG、30 組撞名併發、轉檔失敗不留殘骸 |
 | `test_failures.py` | 壞檔搬移與說明檔、缺 7-Zip 不誤搬、WebP（含動圖）與非圖片內容位元組不變 |
+| `test_jpeg_efficiency.py` | `jpeg_efficiency.py` 研究工具：輸入唯讀、量到的位元組數等於 `resize._encode`、壞檔不拖垮整批且錯誤寫在 CSV 的 error 欄、彙總與「改門檻」的數學、圖表座標含負值、zip/資料夾/單檔取樣 |
 | `test_resize_launch.py` | 選單 `[X]` 直接執行 Resize：直接處理 / 查看效率不足標記 / 忽略標記重評、空工作區不空跑、不依賴工作目錄、失敗代碼會顯示；標記清單的輸出格式；真的跑一次 `resize.py --list-flags` |
 | `test_lowgain_and_done.py` | 效率不足標記不再來回空轉（含同名碰撞）、完成目錄三條路徑與 mtime 保留 |
 | `test_surrogate.py` | 檔名含落單 surrogate 時，所有快取檔仍能寫入、讀回並對得上原檔 |
