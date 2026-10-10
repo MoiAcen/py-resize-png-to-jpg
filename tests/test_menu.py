@@ -45,8 +45,14 @@ def main():
         out, _ = capture(mv.print_menu, ranked)
         c.check(f'共 {len(ranked)} 名，以下列出前 3 名' in out, '標題標示總名次與列出筆數')
         c.check(out.count('] ── PNG:') == 3, '只列 3 行')
-        for label in ('[R] 顯示全排名', '[E] 追加解析', '[S] 無標籤檔案快速分類'):
+        for label in ('[R] 顯示全排名', '[E] 追加解析', '[S] 無標籤檔案快速分類',
+                      '[T] 直接加入標籤'):
             c.check(label in out, f'選單上有 {label}')
+        c.check('[0] 全部檔案套用Resize' in out, '[0] 的名稱改成「全部檔案套用Resize」')
+        c.check('全域掃描' not in out, '舊名稱「全域掃描…」已不在選單上')
+        out2, sel = capture(mv.resolve_selection, '0', ranked, sb.src, set(), {})
+        c.check(sel == ([], None) and '全部檔案套用Resize' in out2,
+                '選了 [0] 之後的確認訊息也用新名稱，行為（不過濾標籤）不變')
 
         c.section('顯示全排名：翻頁')
         feed_input(mv, ['', '', 'P', '4', 'Q'])

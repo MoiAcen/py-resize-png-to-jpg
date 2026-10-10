@@ -76,6 +76,67 @@ def main():
                     f'壞檔原樣保留、好檔正常轉出: {sorted(zf.namelist())}')
         pool.shutdown()
 
+        c.section('調色盤 PNG（逐項透明度）不得觸發 Pillow 警告，像素也不能變')
+        import warnings
+        from pathlib import Path
+        from PIL import Image, ImageChops
+
+        def palette_png(path, transparency):
+            im = Image.new('P', (60, 40))
+            pal = [0] * 768
+            for i, rgb in enumerate([(255, 0, 0), (0, 255, 0), (0, 0, 255), (250, 250, 250)]):
+                pal[i * 3:i * 3 + 3] = rgb
+            im.putpalette(pal)
+            im.putdata([i % 4 for i in range(60 * 40)])
+            kw = {} if transparency is None else {'transparency': transparency}
+            im.save(path, 'PNG', **kw)
+            return Path(path)
+
+        def palette_warnings(fn):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                result = fn()
+            return result, [w for w in caught if 'Palette images' in str(w.message)]
+
+        cases = [('逐項透明度(bytes)', bytes([0, 128, 255, 255])),
+                 ('單一透明索引(int)', 0),
+                 ('沒有透明度', None)]
+        for label, trns in cases:
+            png = palette_png(sb.tmp / f'pal_{abs(hash(label))}.png', trns)
+            with Image.open(png) as im:
+                mode_before = im.mode
+                got, warned = palette_warnings(lambda: resize.to_rgb(im))
+                # 以前的寫法：直接 convert('RGB')。警告靜音後拿來當像素的標準答案
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    expected = im.convert('RGB')
+                same = ImageChops.difference(got, expected).getbbox() is None
+            c.check(mode_before == 'P' and got.mode == 'RGB', f'{label}: P → RGB')
+            c.check(not warned, f'{label}: 沒有 Pillow 警告（{len(warned)} 則）')
+            c.check(same, f'{label}: 像素與以前直接轉 RGB 完全一致（只是不再警告）')
+
+        c.section('其他模式照舊可以轉，也不受影響')
+        for mode in ('RGBA', 'LA', 'L', '1', 'RGB'):
+            im = Image.new(mode, (8, 8))
+            c.check(resize.to_rgb(im).mode == 'RGB', f'{mode} → RGB')
+
+        c.section('三個轉換點都不再警告：PNG→JPG、JPG 重壓、JPG 自動品質')
+        trns_png = palette_png(sb.tmp / 'trns.png', bytes([0, 128, 255, 255]))
+        # 內容是調色盤 PNG、副檔名卻是 .jpg 的檔案：Pillow 看內容不看副檔名，
+        # 會一路走到 JPG 重壓路徑。要在 worker 之前備份——轉檔成功會刪掉原 PNG
+        disguised = sb.tmp / 'disguised.jpg'
+        disguised.write_bytes(trns_png.read_bytes())
+
+        result, warned = palette_warnings(
+            lambda: resize.convert_single_image_worker((str(trns_png), 80)))
+        c.check(not warned, 'PNG→JPG（convert_single_image_worker）沒有警告')
+        c.check(result == (True, False) and (sb.tmp / 'trns.jpg').exists(),
+                '而且這張調色盤 PNG 確實被轉成 JPG 了（不是因為轉失敗才沒警告）')
+        data, warned = palette_warnings(lambda: resize._recompress_bytes(disguised, 80, 2))
+        c.check(not warned and data, 'JPG 重壓（_recompress_bytes）沒有警告且有輸出')
+        out, warned = palette_warnings(lambda: resize._recompress_auto(disguised, 2))
+        c.check(not warned and out and out[0], 'JPG 自動品質（_recompress_auto）沒有警告且有輸出')
+
     return c.finish()
 
 

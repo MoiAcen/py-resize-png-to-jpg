@@ -34,7 +34,7 @@ def main():
         feed_input(mv, ['T'])
         out, ret = capture(mv.smart_analyze_keyword_on_the_fly,
                            'tako', sb.src, cu.load_processed_files(), cu.load_hash_cache())
-        c.check('已把標籤「tako」掛到 3 個檔案上' in out, '三個 tako 檔都被掛上標籤')
+        c.check('已把標籤「tako」設到 3 個檔案上' in out, '三個 tako 檔都被標上標籤')
         c.check('檔名一個字都沒改' in out, '有說明沒有動檔名')
         c.check(ret is None, '標記後回到選單，不執行搬移')
         c.check(sorted(p.name for p in sb.src.glob('*.zip')) == sorted(names),
@@ -136,6 +136,82 @@ def main():
         cu.load_tag_rule(force=True)
         c.check(set(cu.load_tag_rule()['accepted']) == {'ABC', 'XYZ', '2024'},
                 f"全部採用後清單累加: {cu.load_tag_rule()['accepted']}")
+
+    # ---------- [T] 直接加入標籤 ----------
+    with Sandbox() as sb:
+        import analysis
+        import common_utils as cu
+        import moveToResize as mv
+        analysis.trigger_move_script = lambda: None
+        sb.sync(analysis, cu, mv)
+        cu.load_manual_tags(force=True)
+        cu.load_tag_rule(force=True)
+
+        names = ['[xyz] a.zip', 'xyz-series b.zip', 'plain c.zip', '[Other] d.zip']
+        for i, n in enumerate(names):
+            make_png_zip(sb.src / n, seed=i)
+        capture(analysis.main, auto_next=False)
+
+        c.section('[T] 直接加入標籤：標籤名稱和搜尋關鍵字是兩回事')
+        feed_input(mv, ['ABCDE', 'xyz', 'y'])
+        out, ok = capture(mv.add_tag_directly, sb.src)
+        c.check(ok, '用名稱 ABCDE 加入成功（舊流程做不到：標籤名稱只能等於搜尋關鍵字）')
+        c.check('命中「xyz」的壓縮包共 2 個' in out, '預覽說明命中幾個檔案')
+        c.check('已把標籤「ABCDE」設到 2 個檔案上' in out, '標籤名稱是 ABCDE，不是關鍵字 xyz')
+        c.check(sorted(p.name for p in sb.src.glob('*.zip')) == sorted(names), '檔名一個字都沒改')
+        cu.load_manual_tags(force=True)
+        c.check(cu.extract_all_tags('[xyz] a.zip') == ['ABCDE'], '[xyz] a.zip 的標籤變成 ABCDE')
+        c.check(cu.extract_all_tags('xyz-series b.zip') == ['ABCDE'], '沒括號的也歸到 ABCDE')
+        c.check(cu.extract_all_tags('plain c.zip') == [], '沒命中的檔案不受影響')
+
+        capture(analysis.main, auto_next=False)
+        by_tag = {r['tag']: r['total_files'] for r in read_json(config.TARGETS_CACHE)}
+        c.check(by_tag.get('ABCDE') == 2, f'排行榜出現 ABCDE（2 個檔案）: {by_tag.get("ABCDE")}')
+        c.check('xyz' not in by_tag, '原本的 xyz 標籤已被取代，不再自成一格')
+
+        c.section('[T] 關鍵字留空 → 用標籤名稱本身去找檔案')
+        feed_input(mv, ['plain', '', 'y'])
+        out, ok = capture(mv.add_tag_directly, sb.src)
+        c.check(ok and '命中「plain」的壓縮包共 1 個' in out, 'Enter 時關鍵字等於標籤名稱')
+        cu.load_manual_tags(force=True)
+        c.check(cu.extract_all_tags('plain c.zip') == ['plain'], 'plain c.zip 標成 plain')
+
+        c.section('[T] 重新標記 = 取代，不疊加')
+        feed_input(mv, ['NEWNAME', 'xyz', 'y'])
+        out, ok = capture(mv.add_tag_directly, sb.src)
+        cu.load_manual_tags(force=True)
+        c.check(cu.extract_all_tags('[xyz] a.zip') == ['NEWNAME'],
+                f"ABCDE 被 NEWNAME 取代，不是兩個都有: {cu.extract_all_tags('[xyz] a.zip')}")
+        capture(analysis.main, auto_next=False)
+        by_tag = {r['tag']: r['total_files'] for r in read_json(config.TARGETS_CACHE)}
+        c.check('ABCDE' not in by_tag and by_tag.get('NEWNAME') == 2,
+                f'排行榜上 ABCDE 消失、NEWNAME 有 2 個，沒有重複計算: {by_tag}')
+
+        c.section('[T] 重複標記同一個名稱是 no-op')
+        feed_input(mv, ['NEWNAME', 'xyz', 'y'])
+        out, ok = capture(mv.add_tag_directly, sb.src)
+        c.check(not ok and '都已經是標籤「NEWNAME」' in out, '沒有重複寫入')
+        c.check('2 個已經是「NEWNAME」' in out, '預覽就先提示有幾個已經是了')
+
+        c.section('[T] 各種不該動手的情況')
+        before = dict(cu.load_manual_tags(force=True))
+        feed_input(mv, [''])
+        out, ok = capture(mv.add_tag_directly, sb.src)
+        c.check(not ok and '未輸入標籤名稱' in out, '沒輸入名稱就擋下來')
+        feed_input(mv, ['SOMETAG', 'no-such-keyword'])
+        out, ok = capture(mv.add_tag_directly, sb.src)
+        c.check(not ok and '沒有任何檔名命中' in out, '關鍵字沒命中任何檔案就說明並結束')
+        feed_input(mv, ['SOMETAG', 'xyz', 'n'])
+        out, ok = capture(mv.add_tag_directly, sb.src)
+        c.check(not ok and '已取消' in out, '預覽後回答 n 就取消')
+        c.check(dict(cu.load_manual_tags(force=True)) == before, '以上三種都沒有改到對照表')
+
+        c.section('[T] 標籤名稱撞到雜訊規則也要能加（那是使用者自己指定的）')
+        feed_input(mv, ['Extra', 'plain', 'y'])
+        out, ok = capture(mv.add_tag_directly, sb.src)
+        cu.load_manual_tags(force=True)
+        c.check(ok and cu.extract_all_tags('plain c.zip') == ['Extra'],
+                '「Extra」平常是雜訊，手動指定時照樣保留')
 
     return c.finish()
 

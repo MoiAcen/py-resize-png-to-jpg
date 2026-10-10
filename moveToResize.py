@@ -23,7 +23,7 @@ from common_utils import (
     save_clean_file, load_targets_cache, load_hash_cache, save_hash_cache,
     get_archive_image_stats, stats_png_ratio, stats_large_jpg_ratio,
     is_slim_target, get_safe_destination, load_lowgain_flags, flag_key,
-    add_manual_tags, TEXT_IO,
+    add_manual_tags, manual_tags_for, TEXT_IO,
     load_tag_rule, save_tag_rule, rule_tag_from_name,
 )
 
@@ -68,18 +68,64 @@ def files_matching_keyword(all_files, kw):
     return hits
 
 
-def apply_keyword_tag(kw, hit_names):
-    """把關鍵字掛成這些檔案的排序標籤（只寫對照表，不動檔名）。"""
-    tag = kw.strip()
-    added = add_manual_tags(hit_names, tag)
-    if added:
-        print(f"\n🏷️ 已把標籤「{tag}」掛到 {added} 個檔案上"
+def apply_keyword_tag(tag, hit_names):
+    """把 tag 設成這些檔案的排序標籤（只寫對照表，不動檔名）。
+
+    標籤名稱不一定等於搜尋關鍵字：[F] 搜尋後的 [T] 用關鍵字本身當名稱，
+    [T] 直接加入標籤則可以另外取名。一個檔案只會有一個手動標籤，重新標記是取代。
+    """
+    tag = tag.strip()
+    changed = add_manual_tags(hit_names, tag)
+    if changed:
+        print(f"\n🏷️ 已把標籤「{tag}」設到 {changed} 個檔案上"
               f"（記錄在 {MANUAL_TAG_FILE.name}，檔名一個字都沒改）")
-        print(f"   這 {len(hit_names)} 個包之後只會歸在 [{tag}] 這一個排序標籤底下；")
+        print(f"   這些包之後只會歸在 [{tag}] 這一個排序標籤底下（原本的手動標籤已被取代）；")
         print("   下次跑分析、或選 [E] 追加解析之後，排行榜就會反映出來喵！")
     else:
-        print(f"\n💡 這 {len(hit_names)} 個檔案都已經掛過標籤「{tag}」了喵！")
-    return added
+        print(f"\n💡 這 {len(hit_names)} 個檔案都已經是標籤「{tag}」了喵！")
+    return changed
+
+
+def add_tag_directly(src_path):
+    """直接指定標籤名稱，再用檔名關鍵字挑出要套用的檔案。
+
+    和 [F] 搜尋後的 [T] 不同：那邊標籤名稱就是搜尋關鍵字，而且得先搜到東西才有得選；
+    這裡名稱可以自己取（例如 ABCDE），套用範圍另外用關鍵字決定（Enter 則用名稱本身）。
+    """
+    tag = input("\n👉 要加入的標籤名稱 (例如: ABCDE): ").strip()
+    if not tag:
+        print("⚠️ 未輸入標籤名稱喵！")
+        return False
+
+    kw_in = input(f"👉 套用到檔名含哪個關鍵字的檔案？(Enter 用「{tag}」本身): ").strip()
+    kw = kw_in or tag
+
+    hits = files_matching_keyword(list_archives(src_path), kw)
+    if not hits:
+        print(f"❌ 沒有任何檔名命中「{kw}」，沒有東西可以標記喵！")
+        return False
+
+    already = sum(1 for n in hits
+                  if [t.lower() for t in manual_tags_for(n)] == [tag.lower()])
+    print("-" * 75)
+    print(f"🔎 檔名命中「{kw}」的壓縮包共 {len(hits)} 個，預覽前 5 個：")
+    for name in hits[:5]:
+        current = extract_all_tags(name)
+        shown = '、'.join(current) if current else '無標籤'
+        print(f"   • {clean_str(name)}   (目前標籤: {clean_str(shown)})")
+    if len(hits) > 5:
+        print(f"   … 另有 {len(hits) - 5} 個")
+    if already:
+        print(f"   ({already} 個已經是「{tag}」，不會重複標記)")
+    print("-" * 75)
+
+    answer = input(f"👉 要把這 {len(hits)} 個檔案都標成「{tag}」嗎？"
+                   f"（目前的標籤會被取代）(y/N): ").strip().lower()
+    if answer != 'y':
+        print("💡 已取消，什麼都沒有改喵！")
+        return False
+
+    return bool(apply_keyword_tag(tag, hits))
 
 
 def smart_analyze_keyword_on_the_fly(kw, src_path, processed_files, hash_cache):
@@ -540,10 +586,11 @@ def print_menu(targets):
         print(f" [R] 顯示全排名 (分頁翻閱全部 {len(targets)} 名)")
         print(f" [數字] 搬移指定名次的單一標籤 (可直接輸入全排名的名次，1~{len(targets)})")
     print(" [F] 關鍵字搜尋 (發動即時精算/Hash快取)")
-    print(" [0] 全域掃描所有符合條件的檔案")
+    print(" [0] 全部檔案套用Resize")
     print(" [M] 手動輸入標籤進行精準比對")
     print(" [E] 追加解析 (指定筆數，補掃還沒解析過的壓縮包後重新排名)")
     print(" [S] 無標籤檔案快速分類 (用分隔符切檔名，看過再決定採用哪些標籤)")
+    print(" [T] 直接加入標籤 (自己取標籤名稱，再用檔名關鍵字指定要套用的檔案)")
     print(" [C] 徹底清除所有舊快取檔 (包含黑名單與舊 Hash 快取)")
     print(" [Q] 離開")
     print("-" * 75)
@@ -571,7 +618,7 @@ def resolve_selection(user_choice, targets, src_path, processed_files, hash_cach
         return res_tags, kw
 
     if user_choice == '0':
-        print("\n🚀 已選擇全域檢查搬移喵！")
+        print("\n🚀 已選擇【全部檔案套用Resize】，所有符合條件的壓縮包都會搬去處理喵！")
         return [], None
 
     if user_choice == 'M':
@@ -631,6 +678,11 @@ def main():
 
         if user_choice == 'S':
             rule_tag_wizard(src_path)
+            print()
+            continue
+
+        if user_choice == 'T':
+            add_tag_directly(src_path)
             print()
             continue
 
