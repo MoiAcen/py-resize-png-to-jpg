@@ -27,6 +27,7 @@ python tests/test_tags.py            # 單獨跑一組
 | `test_convert.py` | PNG 轉檔不得蓋掉同名 JPG、30 組撞名併發、轉檔失敗不留殘骸 |
 | `test_failures.py` | 壞檔搬移與說明檔、缺 7-Zip 不誤搬、WebP（含動圖）與非圖片內容位元組不變 |
 | `test_jpeg_efficiency.py` | `jpeg_efficiency.py` 研究工具：輸入唯讀、量到的位元組數等於 `resize._encode`、壞檔不拖垮整批且錯誤寫在 CSV 的 error 欄、彙總與「改門檻」的數學、圖表座標含負值、zip/rar/7z/資料夾/單檔取樣（rar 用手工組的 RAR5 + 真的 7-Zip 驗證，沒裝 7-Zip 時自動跳過那一組） |
+| `test_jpeg_policy.py` | JPG 重壓設定的不變量：壓完的檔案下一輪不會被再挑中（掃過 13 個目標品質值，含邊界 Q85）、舊版 Q92 產出不被再壓、改目標品質會讓效率不足標記失效 |
 | `test_resize_launch.py` | 選單 `[X]` 直接執行 Resize：直接處理 / 查看效率不足標記 / 忽略標記重評、空工作區不空跑、不依賴工作目錄、失敗代碼會顯示；標記清單的輸出格式；真的跑一次 `resize.py --list-flags` |
 | `test_lowgain_and_done.py` | 效率不足標記不再來回空轉（含同名碰撞）、完成目錄三條路徑與 mtime 保留 |
 | `test_surrogate.py` | 檔名含落單 surrogate 時，所有快取檔仍能寫入、讀回並對得上原檔 |
