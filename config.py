@@ -108,15 +108,23 @@ JPEG_SKIP_BELOW_QUALITY     = 85    # 估算品質 < 此值 → 跳過以保護�
 #   'off'    = 完全不做 JPG 體檢
 # （A/B 皆用 pip 套件 mozjpeg-lossless-optimization，免裝外部 exe）
 JPEG_FIX_MODE           = 'auto'
-JPEG_TARGET_QUALITY     = 92   # B（重壓）對「寫實/照片類」內容的目標品質
+# B（重壓）的目標品質。依 jpeg_efficiency.py 對 30 張 Q95 4:2:0 插畫的實測（整批縮減 / 最差一張
+# 對來源的 PSNR）：Q92 省 25.5% / 48.0 dB、Q88 省 43.3% / 45.8 dB、Q85 省 51.3% / 45.1 dB、
+# Q80 省 59.2% / 43.8 dB。Q85 之後每多省一點付出的畫質才開始變貴。
+# 想再省就調低、想保守就調高；調之前建議用 quality_test.py 看最劣區域的 _crop.png，
+# 線稿邊緣的蚊狀雜訊 PSNR 看不出來。已處理過的檔案不受影響（重壓只在估算品質 >= 95 時觸發）。
+JPEG_TARGET_QUALITY     = 85
 JPEG_TARGET_SUBSAMPLING = 2    # B 重壓的色度抽樣：2 = 4:2:0（省空間、肉眼幾乎無感）
 
 # --- 依內容分流：平塗（賽璐璐風）可以壓得更兇，寫實紋理則保守 ---
 # 判斷指標是「顏色數佔比」：把圖以 NEAREST 取樣成小圖後，相異顏色數 / 總像素。
-# 實測分離度很大——真實照片 36~74%，平塗類 0~9%，中間有約 27 個百分點的空隙。
+# 實測真實照片 36~74%，銳利的平塗類 0~9%，中間有約 27 個百分點的空隙。
 # 低於門檻視為平塗 → 用 JPEG_FLAT_QUALITY；否則用 JPEG_TARGET_QUALITY。
 # 門檻預設偏保守（偏向判成寫實），寧可少省一點也不要壓壞細節多的圖。
-# 想校準成自己收藏的實際分佈，用 quality_test.py 看每張圖的實測值。
+# ⚠️ 但柔和漸層的插畫（含 AI 生成）顏色種類很多，會落在照片範圍的低緣：實測 30 張插畫
+#    顏色佔比中位數 38.2%、全數判成寫實。收藏以插畫為主時這個分流幾乎不會觸發，
+#    請直接調 JPEG_TARGET_QUALITY，不必指望分流。
+# 想校準成自己收藏的實際分佈，用 jpeg_efficiency.py 看顏色佔比分布與縮圖對照。
 JPEG_FLAT_QUALITY       = 80    # 平塗內容的目標品質；設成與 JPEG_TARGET_QUALITY 相同即等於關閉分流
 JPEG_FLAT_COLOR_RATIO   = 0.15  # 顏色數佔比低於此值 → 判定為平塗
 JPEG_CONTENT_SAMPLE_SIZE = 160  # 判定用的取樣邊長（越大越準也越慢；160 約 5ms/張）
