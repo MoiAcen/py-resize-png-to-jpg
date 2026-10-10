@@ -347,28 +347,93 @@ def move_files_for_pattern(src_path, dst_path, processed_files, hash_cache, sear
         trigger_resize_prompt()
 
 
+def resize_script_path():
+    """resize.py 的位置：以本檔所在的資料夾為準，不依賴執行時所在的工作目錄。"""
+    return Path(__file__).resolve().parent / RESIZE_SCRIPT_NAME
+
+
+def run_resize_script(extra_args=()):
+    """在子行程啟動 resize.py，回傳是否正常結束。extra_args 例如 ('--recheck',)。"""
+    script = resize_script_path()
+    if not script.exists():
+        print(f"💡 提醒：找不到瘦身腳本 [{script}] 喵！")
+        return False
+
+    label = ' '.join(extra_args)
+    print(f"\n🚀 正在啟動 {script.name} {label}...\n" + "=" * 65 + "\n")
+    try:
+        result = subprocess.run([sys.executable, str(script), *extra_args],
+                                cwd=str(script.parent))
+    except Exception as e:
+        print(f"❌ 執行瘦身腳本失敗: {e} 喵！")
+        return False
+    if result.returncode != 0:
+        print(f"⚠️ {script.name} 結束時回傳代碼 {result.returncode} 喵！")
+        return False
+    return True
+
+
 def trigger_resize_prompt():
     """搬移完成後，詢問是否接著啟動轉檔腳本。"""
-    target_script = Path(RESIZE_SCRIPT_NAME)
-
     print("\n" + "=" * 65)
-    if not target_script.exists():
-        print(f"💡 提醒：未在當前目錄找到瘦身腳本 [{RESIZE_SCRIPT_NAME}] 喵！")
+    if not resize_script_path().exists():
+        print(f"💡 提醒：找不到瘦身腳本 [{resize_script_path()}] 喵！")
         print("=" * 65)
         return
 
     user_input = input(
-        f"❓ 搬移已完成！是否要立即啟動瘦身腳本 [{target_script.name}] 進行轉檔？(y/N): "
+        f"❓ 搬移已完成！是否要立即啟動瘦身腳本 [{RESIZE_SCRIPT_NAME}] 進行轉檔？(y/N): "
     ).strip().lower()
     if user_input == 'y':
-        print(f"\n🚀 正在啟動 {target_script.name} ...\n" + "=" * 65 + "\n")
-        try:
-            subprocess.run([sys.executable, str(target_script)])
-        except Exception as e:
-            print(f"❌ 執行瘦身腳本失敗: {e} 喵！")
+        run_resize_script()
     else:
         print("💡 已跳過自動瘦身，後續可自行手動執行 resize.py 喵！")
     print("=" * 65)
+
+
+def count_waiting_archives():
+    """工作區裡等著被 resize 處理的壓縮包數（判斷方式與 resize.py 一致）。"""
+    workspace = Path(TARGET_DIR)
+    if not workspace.exists():
+        return 0
+    return sum(
+        1 for f in workspace.glob('*')
+        if f.is_file() and f.suffix.lower() in ARCHIVE_EXTENSIONS
+        and not f.name.endswith('_temp_processing.zip')
+    )
+
+
+def run_resize_menu():
+    """直接執行 resize.py，不必先搬移。也能在這裡查看或重評「效率不足」標記。"""
+    waiting = count_waiting_archives()
+    flagged = len(load_lowgain_flags())
+
+    print("-" * 75)
+    print(f"🛠️ 直接執行 resize.py：處理 [{TARGET_DIR}] 裡現有的壓縮包")
+    print(f"   工作區目前有 {waiting} 個壓縮包待處理；{flagged} 個已標記為「效率不足」")
+    print("-" * 75)
+    print(" [Enter] 直接處理工作區裡的壓縮包")
+    print(" [L] 先列出「效率不足」標記（只查看，不處理任何東西）")
+    print(" [R] 忽略標記，全部重新評估後再處理 (--recheck)")
+    print(" [Q] 取消")
+    print("-" * 75)
+
+    choice = input("👉 請選擇: ").strip().upper()
+    if choice == 'Q':
+        print("💡 已取消喵！")
+        return False
+    if choice == 'L':
+        return run_resize_script(('--list-flags',))
+    if choice not in ('', 'R'):
+        print("❌ 輸入無效喵！")
+        return False
+
+    if waiting == 0:
+        # 空跑沒有意義，也省得使用者以為它在忙
+        print(f"💡 工作區 [{TARGET_DIR}] 目前沒有壓縮包。先用排行榜、[F]、[0] 等選項把檔案搬進來再處理喵！")
+        return False
+
+    return run_resize_script(('--recheck',) if choice == 'R' else ())
 
 
 def show_full_ranking(targets):
@@ -591,6 +656,7 @@ def print_menu(targets):
     print(" [E] 追加解析 (指定筆數，補掃還沒解析過的壓縮包後重新排名)")
     print(" [S] 無標籤檔案快速分類 (用分隔符切檔名，看過再決定採用哪些標籤)")
     print(" [T] 直接加入標籤 (自己取標籤名稱，再用檔名關鍵字指定要套用的檔案)")
+    print(" [X] 直接執行 Resize (處理工作區現有的壓縮包；也能在這裡查看/重評「效率不足」標記)")
     print(" [C] 徹底清除所有舊快取檔 (包含黑名單與舊 Hash 快取)")
     print(" [Q] 離開")
     print("-" * 75)
@@ -683,6 +749,11 @@ def main():
 
         if user_choice == 'T':
             add_tag_directly(src_path)
+            print()
+            continue
+
+        if user_choice == 'X':
+            run_resize_menu()
             print()
             continue
 
