@@ -119,27 +119,32 @@ def manual_tags_for(filename):
 
 
 def add_manual_tags(filenames, tag):
-    """把同一個標籤掛到多個檔名上，回傳實際新增的筆數（已經有的不重複加）。"""
+    """把同一個標籤掛到多個檔名上，回傳實際變動的筆數。
+
+    一個檔案只會有一個手動標籤：重新標記是「取代」不是「疊加」。疊加的話，
+    先標 tako 再標 ABCDE 的檔案會同時出現在兩個排行項目底下、被算兩次，
+    也就不是「收攏成同一個排序標籤」了；而且沒有移除標籤的功能，標錯就改不回來。
+    已經是這個標籤的檔案不算變動（重複標記是 no-op）。
+    """
     tag = tag.strip()
     if not tag:
         return 0
 
     mapping = dict(load_manual_tags())
     lower_index = {k.lower(): k for k in mapping}
-    added = 0
+    changed = 0
     for name in filenames:
         key = lower_index.get(name.lower(), name)
-        existing = list(mapping.get(key, []))
-        if any(t.lower() == tag.lower() for t in existing):
+        existing = mapping.get(key, [])
+        if len(existing) == 1 and existing[0].lower() == tag.lower():
             continue
-        existing.append(tag)
-        mapping[key] = existing
+        mapping[key] = [tag]
         lower_index[key.lower()] = key
-        added += 1
+        changed += 1
 
-    if added and not save_manual_tags(mapping):
+    if changed and not save_manual_tags(mapping):
         return 0
-    return added
+    return changed
 
 
 # ================= 無標籤檔案的切割規則 =================

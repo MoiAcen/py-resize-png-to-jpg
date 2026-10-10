@@ -53,6 +53,10 @@ def main():
         c.check(cu.extract_all_tags('[Kurohime] 別人的包.zip') == ['Kurohime'],
                 '沒被標記的包不受影響')
         c.check(cu.add_manual_tags(names, 'tako') == 0, '重複標記是 no-op')
+        c.check(cu.add_manual_tags(names[:1], 'ABCDE') == 1, '換一個標籤算一次變動')
+        c.check(cu.extract_all_tags(names[0]) == ['ABCDE'],
+                f'重新標記是取代不是疊加（疊加會同時出現在兩個排行項目）: {cu.extract_all_tags(names[0])}')
+        c.check(cu.extract_all_tags(names[1]) == ['tako'], '同批沒被重新標記的檔案不受影響')
 
         c.section('切割規則：只認採用過的標籤')
         c.check(cu.rule_tag_from_name('ABC-BBB-CC.zip', '-', 1) == 'ABC', '切出第一段 ABC')

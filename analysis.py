@@ -322,7 +322,7 @@ def main(scan_limit=None, auto_next=True):
               f"——已經沒有更多沒掃過的檔案了，直接進排名")
     if untagged_count:
         print(f"🏷️ 另有 {untagged_count} 個包檔名裡沒有可用標籤：已解析並存進快取，"
-              f"但無法歸類到排行榜（可用 [0] 全域搬移或 [F] 關鍵字搜尋處理）")
+              f"但無法歸類到排行榜（可用 [T] 直接加入標籤、[S] 切割規則分類，或 [0] 全部檔案套用Resize）")
     if cached_extra_count:
         print(f"⚡ 掃描上限之後，另有 {cached_extra_count} 個包直接採用快取既有資料納入統計（零額外 I/O）")
     if uncached_skipped_count:
