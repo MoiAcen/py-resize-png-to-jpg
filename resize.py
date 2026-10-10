@@ -800,7 +800,7 @@ def main():
     if args.recheck:
         print(f"♻️ --recheck：忽略 {len(flags)} 筆效率不足標記，全部重新評估")
     elif flags:
-        print(f"🏷️ 已標記效率不足: {len(flags)} 筆（會直接跳過；--recheck 可重評）")
+        print(f"🏷️ 已標記效率不足: {len(flags)} 筆（會直接跳過；--list-flags 可查看清單、--recheck 可重評）")
     print("========================================\n")
 
     try:
