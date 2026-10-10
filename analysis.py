@@ -6,7 +6,7 @@
 import json
 import subprocess
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from config import (
@@ -47,6 +47,27 @@ def trigger_move_script():
     else:
         print("💡 已跳過自動搬移，後續可隨時手動執行 python moveToResize.py 喵！")
     print("=" * 65)
+
+
+def scan_skip_reason(file_path, processed_files, lowgain_flags):
+    """這個壓縮包會不會被拿去解析；會的話回傳 (None, 大小MB)，不會就回傳 (原因, 大小MB)。
+
+    開頭的待解析統計與主迴圈共用這一份判斷。兩邊各算各的就會出現「開頭說還有三萬
+    多筆待解析、實際只解析了十幾筆」：被這些條件擋掉的檔案永遠不會有快取，
+    只用「總數 − 快取命中」去算的話，它們會永遠被當成待解析。
+
+    順序與原本主迴圈一致：黑名單 → 已標記放棄 → 體積門檻。
+    大小只在走到體積檢查時才量（前兩關先擋掉的不必多一次 stat），沒量到就是 None。
+    """
+    name = file_path.name.lower()
+    if name in processed_files or name == LOG_FILE.name.lower():
+        return 'blacklist', None
+    if flag_key(file_path) in lowgain_flags:
+        return 'lowgain', None
+    size_mb = file_path.stat().st_size / (1024 * 1024)
+    if size_mb < MIN_ARCHIVE_SIZE_MB:
+        return 'small', size_mb
+    return None, size_mb
 
 
 def main(scan_limit=None, auto_next=True):
@@ -93,10 +114,32 @@ def main(scan_limit=None, auto_next=True):
         if f.is_file() and f.suffix.lower() in ARCHIVE_EXTENSIONS
     ]
 
-    cached_ready = sum(1 for f in all_files if has_cached_stats(f, hash_cache))
-    pending_total = len(all_files) - cached_ready
+    # 把所有檔案分成三類：這輪不會解析的 / 會解析且已有快取的 / 會解析但還沒有快取的。
+    # 只有最後一類才叫「尚待解析」——下面的主迴圈真正會去開檔的就是它們。
+    skipped = Counter()
+    cached_ready = 0
+    pending_total = 0
+    for f in all_files:
+        reason, _ = scan_skip_reason(f, processed_files, lowgain_flags)
+        if reason:
+            skipped[reason] += 1
+        elif has_cached_stats(f, hash_cache):
+            cached_ready += 1
+        else:
+            pending_total += 1
+
     print(f"📦 掃描範圍 {len(all_files)} 個壓縮包："
           f"{cached_ready} 筆直接套用快取，{pending_total} 筆尚待解析")
+    skipped_total = sum(skipped.values())
+    if skipped_total:
+        parts = []
+        if skipped['small']:
+            parts.append(f"低於 {MIN_ARCHIVE_SIZE_MB} MB 門檻 {skipped['small']} 個")
+        if skipped['blacklist']:
+            parts.append(f"黑名單 {skipped['blacklist']} 個")
+        if skipped['lowgain']:
+            parts.append(f"已標記放棄 {skipped['lowgain']} 個")
+        print(f"⏭️ 另有 {skipped_total} 筆這輪不會解析：{'、'.join(parts)}")
     if scan_limit is not None:
         print(f"➕ 追加解析模式：本輪最多新解析 {scan_limit} 筆")
     print()
@@ -144,24 +187,18 @@ def main(scan_limit=None, auto_next=True):
                 print(f"\n🎉 本輪已解析出 {MAX_TARGET_FILES} 個高潛力爆發包！"
                       f"接下來不再開新檔案，但快取裡已知的包仍會納入排行榜喵！")
 
-        # 跳過黑名單與紀錄檔本身（以小寫檔名比對）
-        if (file_path.name.lower() in processed_files
-                or file_path.name.lower() == LOG_FILE.name.lower()):
-            continue
-
-        # 試過但省太少的包：不列入統計、也不列入排行榜，免得反覆被搬來搬去
-        if flag_key(file_path) in lowgain_flags:
+        # 黑名單、試過但省太少的包、體積太小的包：不解析、也不列入統計
+        # （判斷與開頭的待解析統計共用 scan_skip_reason，兩邊才不會對不上）
+        reason, archive_mb = scan_skip_reason(file_path, processed_files, lowgain_flags)
+        if reason == 'lowgain':
             lowgain_skipped_count += 1
+        if reason:
             continue
 
         # 注意順序：先讓它被分析，最後才談標籤。
         # 「沒有可用標籤」只代表無法歸類到排行榜，不代表這個包不該被看一眼——
         # 提早 continue 會讓它連開都不開，還會永遠卡在「尚待解析」的數字裡。
         tags = extract_all_tags(file_path.name)
-
-        archive_mb = file_path.stat().st_size / (1024 * 1024)
-        if archive_mb < MIN_ARCHIVE_SIZE_MB:
-            continue
 
         scanned_total_count += 1
 
