@@ -108,7 +108,11 @@ JPEG_SKIP_BELOW_QUALITY     = 85    # 估算品質 < 此值 → 跳過以保護�
 #   'off'    = 完全不做 JPG 體檢
 # （A/B 皆用 pip 套件 mozjpeg-lossless-optimization，免裝外部 exe）
 JPEG_FIX_MODE           = 'auto'
-JPEG_TARGET_QUALITY     = 92   # B（重壓）對「寫實/照片類」內容的目標品質
+JPEG_TARGET_QUALITY     = 85   # B（重壓）對「寫實/照片類」內容的目標品質（原 92；依 30 張樣本 PSNR 測試改為 85）
+# 注意（分流盲點）：分流只看「顏色數佔比」，插畫類若有漸層、噪點或網點，顏色數會偏高而被判成寫實，
+#   於是吃到 Q85 而不是平塗的 Q80；反過來，低於門檻的寫實圖會被壓到 Q80。
+#   重壓後估算品質 <= 目標品質的圖不會再被重壓（見 jpeg_inspector.classify_jpeg），不會來回壓。
+#   快取簽章含 JPEG_TARGET_QUALITY，改動後舊的統計快取會自動重算。
 JPEG_TARGET_SUBSAMPLING = 2    # B 重壓的色度抽樣：2 = 4:2:0（省空間、肉眼幾乎無感）
 
 # --- 依內容分流：平塗（賽璐璐風）可以壓得更兇，寫實紋理則保守 ---
