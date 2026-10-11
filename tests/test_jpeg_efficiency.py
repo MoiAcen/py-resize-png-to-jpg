@@ -116,7 +116,7 @@ def main():
                 '變大的那張在整批合計裡保留原檔（與流程「變小才替換」一致）')
         c.check(s['by_q'][92]['not_smaller'] == 1, '「沒變小」的張數 = 1')
         c.check(s['by_q'][92]['min_savings'] == 1 - 1200 / 1000, '單張範圍的最小值保留負數，不被截成 0')
-        c.check(s['routes'] == {'A': 1, 'B': 2, 'skip': 1}, f"流程分流計數正確: {s['routes']}")
+        c.check(s['routes'] == {'A': 1, 'B': 2, 'P': 0, 'skip': 1}, f"流程分流計數正確: {s['routes']}")
         c.check((r1['pipeline_size'], r2['pipeline_size'], r3['pipeline_size'], r4['pipeline_size'])
                 == (700, 1000, 450, 500), 'B 取 q_auto 的結果、變大者保留原檔、A 取無損、跳過不動')
 
@@ -193,8 +193,10 @@ def main():
                 '指名的單一檔案不套用大小門檻')
         out, got = capture(je.collect_samples, str(sb.root / 'nope'), 1, 'random', 1, 0, work)
         c.check(got == [] and '找不到輸入' in out, '輸入不存在時說明並回傳空清單')
-        out, got = capture(je.collect_samples, str(lib / 'ignored.png'), 1, 'random', 1, 0, work)
-        c.check(got == [] and '不是 JPG' in out, '指到非 JPG 檔時說明並回傳空清單')
+        (lib / 'notes.txt').write_text('x')
+        out, got = capture(je.collect_samples, str(lib / 'notes.txt'), 1, 'random', 1, 0, work)
+        c.check(got == [] and '不是 JPG / PNG' in out, '指到不是圖片的檔案時說明並回傳空清單')
+        (lib / 'notes.txt').unlink()
 
         # ---------- 9. rar / 7z（透過 7-Zip）----------
         import common_utils as cu
@@ -294,6 +296,104 @@ def main():
         c.check(je._member_disk_path(wd, 'a/b/c.jpg') == wd / 'a' / 'b' / 'c.jpg', 'Unix 分隔符')
         c.check(je._member_disk_path(wd, 'a\\b\\c.jpg') == wd / 'a' / 'b' / 'c.jpg',
                 'Windows 分隔符也能正確拆開')
+
+        # ---------- 9b. PNG 轉 JPG 模式 ----------
+        c.section('PNG 模式：量的是正式轉檔的結果，對 PNG 原圖比對')
+        from quality_test import worst_tile_psnr, psnr as qpsnr
+        import quality_test as qt
+        import zipfile as zf_mod
+        pdir = sb.root / 'pngs'
+        pdir.mkdir()
+        photo.save(pdir / 'photo.png', 'PNG')
+        flat.save(pdir / 'flat.png', 'PNG')
+        Image.new('RGB', (40, 40), (0, 0, 0)).save(pdir / 'tiny_black.png', 'PNG')   # 極小，轉 JPG 不會更小
+        noisy_image(seed=9, w=24, h=24).save(pdir / 'tiny_noise.png', 'PNG')
+        pbefore = {p.name: md5(p) for p in pdir.iterdir()}
+        pout = sb.root / 'pout'
+        out, rc = capture(je.main, [str(pdir), '--type', 'png', '--samples', '20', '--workers', '2',
+                                    '--qualities', '70,80,95', '--out', str(pout)])
+        c.check(rc == 0, f'--type png 跑得完（代碼 {rc}）')
+        c.check({p.name: md5(p) for p in pdir.iterdir()} == pbefore, 'PNG 輸入唯讀：內容與數量都沒變')
+        prow = {r['name']: r for r in csv.DictReader(open(pout / 'jpeg_efficiency.csv', encoding='utf-8-sig'))}
+        c.check(set(prow) == {'photo.png', 'flat.png', 'tiny_black.png', 'tiny_noise.png'}, f'四張 PNG 都在 CSV: {sorted(prow)}')
+        c.check(all(r['route'] == 'P' and r['action'] == 'png_convert' for r in prow.values()), '分流欄標成 P（PNG 轉檔）')
+        c.check('q80_worst_tile_psnr' in next(iter(prow.values())), 'CSV 有「最差區塊 PSNR」欄')
+
+        # 與正式轉檔逐位元組相同：直接呼叫 worker 轉一份副本，再與工具量到的大小比
+        wcopy = sb.root / 'wcopy'
+        wcopy.mkdir()
+        photo.save(wcopy / 'photo.png', 'PNG')
+        ok_conv, _ = resize.convert_single_image_worker((str(wcopy / 'photo.png'), config.QUALITY))
+        real = (wcopy / 'photo.jpg').read_bytes()
+        c.check(ok_conv and int(prow['photo.png'][f'q{config.QUALITY}_bytes']) == len(real),
+                f'工具量到的 Q{config.QUALITY} 大小 = 正式轉檔實際產出的大小（{len(real)} 位元組）')
+        with Image.open(pdir / 'photo.png') as ref_im, Image.open(io.BytesIO(real)) as got_im:
+            want_psnr = qpsnr(ref_im.convert('RGB'), got_im.convert('RGB'))
+        c.check(abs(float(prow['photo.png'][f'q{config.QUALITY}_psnr']) - want_psnr) < 0.01,
+                'PSNR 是對 PNG 原圖算的（與獨立重算一致）')
+        c.check(float(prow['photo.png']['q95_psnr']) > float(prow['photo.png']['q70_psnr']), '品質越高 PSNR 越高')
+        c.check(float(prow['photo.png']['q80_worst_tile_psnr']) <= float(prow['photo.png']['q80_psnr']) + 1e-6,
+                '最差區塊 PSNR 不會比整張平均還好')
+        c.check(all(int(r['pipeline_bytes']) <= int(r['size_bytes']) for r in prow.values()),
+                '流程結果不會比 PNG 原檔大（轉出更大就保留原檔）')
+        c.check(any(int(r['pipeline_bytes']) == int(r['size_bytes']) for r in prow.values()),
+                '至少一張「轉成 JPG 反而沒變小」的圖被正確算成保留原檔')
+        page = (pout / 'jpeg_efficiency.html').read_text(encoding='utf-8')
+        c.check('PNG 轉 JPG 畫質研究' in page and '來源品質決定' not in page and '平塗／寫實分流' not in page,
+                'HTML 報告是 PNG 版：沒有與 PNG 無關的「來源品質／分流」章節')
+        c.check('最差區塊' in page, 'HTML 表格有最差區塊欄')
+        c.check(re.search(r'<svg', page) is not None, 'HTML 圖表有畫出來')
+
+        # 預設只取 JPG；--type png 才取 PNG；壓縮包同理
+        both = sb.root / 'both'
+        both.mkdir()
+        photo.save(both / 'p.png', 'PNG')
+        save_jpg(photo, both / 'j.jpg', 95, 2)
+        got = je.collect_samples(str(both), 9, 'largest', 1, 0, work)
+        c.check([n for n, _ in got] == ['j.jpg'], '資料夾預設只取 JPG')
+        got = je.collect_samples(str(both), 9, 'largest', 1, 0, work, je.PNG_EXTENSIONS)
+        c.check([n for n, _ in got] == ['p.png'], '資料夾 --type png 只取 PNG')
+        pz = sb.root / 'pngs.zip'
+        with zf_mod.ZipFile(pz, 'w') as z:
+            z.write(pdir / 'photo.png', 'a/photo.png')
+            z.write(pdir / 'flat.png', 'a/flat.png')
+        out, got = capture(je.collect_samples, str(pz), 5, 'largest', 1, 0, work)
+        c.check(got == [] and '沒有' in out and 'JPG' in out, 'zip 預設找不到 JPG 時有說明')
+        got = je.collect_samples(str(pz), 5, 'largest', 1, 0, work, je.PNG_EXTENSIONS)
+        c.check(sorted(n for n, _ in got) == ['a/flat.png', 'a/photo.png'], 'zip --type png 取出 PNG')
+        out, got = capture(je.collect_samples, str(pdir / 'photo.png'), 1, 'random', 1, 10_000, work)
+        c.check(len(got) == 1, '指名單一 PNG 直接接受（不套用大小門檻）')
+        out, rc = capture(je.main, [str(pdir / 'photo.png'), '--out', str(sb.root / 'o_single')])
+        c.check(rc == 0 and 'PNG 轉 JPG' in out and '最差區塊' in out, '單一 PNG 不加 --type 也會走 PNG 模式')
+
+        # ---------- 最差區塊 PSNR ----------
+        c.section('最差區塊 PSNR：抓得到局部損傷，整張平均抓不到')
+        base = noisy_image(seed=3, w=256, h=256)
+        same = base.copy()
+        c.check(worst_tile_psnr(base, same)[0] == 99.0, '完全相同 → 99 dB')
+        dmg = base.copy()
+        ImageDraw.Draw(dmg).rectangle([128, 64, 191, 127], fill=(255, 255, 255))   # 剛好是一個 64px 區塊
+        wt, tx, ty = worst_tile_psnr(base, dmg)
+        c.check((tx, ty) == (128, 64), f'損傷位置抓對：({tx},{ty})')
+        c.check(wt < qpsnr(base, dmg) - 5, f'最差區塊 {wt:.1f} dB 遠低於整張 {qpsnr(base, dmg):.1f} dB')
+        small = Image.new('RGB', (30, 20), (10, 10, 10))
+        c.check(worst_tile_psnr(small, small.copy())[0] == 99.0, '圖比區塊還小也不會出錯')
+
+        # quality_test.py 的 PNG 支援
+        c.section('quality_test.py 支援 PNG')
+        c.check(len(qt.collect_samples(str(pdir / 'photo.png'), 1, work)) == 1, '單一 PNG 可以收')
+        got = qt.collect_samples(str(pdir), 9, work)
+        c.check(sorted(n for n, _ in got) == ['flat.png', 'photo.png', 'tiny_black.png', 'tiny_noise.png'],
+                '資料夾裡的 PNG 會被收進來')
+        got = qt.collect_samples(str(pz), 9, work)
+        c.check(len(got) == 2, 'zip 裡的 PNG 會被收進來')
+        qout = sb.root / 'qout'
+        qout.mkdir()
+        rep = []
+        out, _ = capture(qt.run_one, 'photo.png', pdir / 'photo.png', [80, 95], qout, rep)
+        c.check('PNG 轉 JPG' in out and '最差區塊' in out and '目前流程用這個' in out, 'PNG 的說明、最差區塊欄、目前品質標記都有')
+        c.check((qout / 'photo_q80.jpg').read_bytes() == real, 'quality_test 產出的 Q80 與正式轉檔逐位元組相同')
+        c.check((qout / 'photo_crop.png').exists() and (qout / 'photo_diff_q80.png').exists(), '最劣區域對照與差異圖都產生了')
 
         # ---------- 10. 參數檢查 ----------
         c.section('參數檢查')
