@@ -7,7 +7,11 @@
 用法：
     python quality_test.py <輸入> [--qualities 80,85,88,92] [--samples 3] [--out 資料夾]
 
-<輸入> 可以是：.zip 壓縮包 / 資料夾 / 單一 .jpg
+<輸入> 可以是：.zip 壓縮包 / 資料夾 / 單一 .jpg 或 .png
+
+JPG 與 PNG 走的是流程裡兩條不同的路，這支工具會各自沿用正式的編碼：
+    JPG  → 重壓（resize.py 的 _encode，目標品質與 4:2:0）；比的是「重壓前後」
+    PNG  → 轉 JPG（config.QUALITY，Pillow 預設抽樣）；比的是「對真正的無損原圖」
 
 產出（預設在 quality_test_out/）：
     summary.txt              數據總表
@@ -27,12 +31,17 @@ from PIL import Image, ImageChops, ImageDraw, ImageStat
 
 from config import (
     JPEG_TARGET_SUBSAMPLING, JPEG_FLAT_COLOR_RATIO,
-    JPEG_FLAT_QUALITY, JPEG_TARGET_QUALITY,
+    JPEG_FLAT_QUALITY, JPEG_TARGET_QUALITY, QUALITY,
 )
 from common_utils import clean_str
-from resize import _recompress_bytes, pick_quality_for   # 直接重用生產路徑，確保結果一致
+from resize import (   # 直接重用生產路徑，確保結果一致
+    _recompress_bytes, pick_quality_for, encode_png_to_jpeg, to_rgb,
+)
 
 JPEG_SUFFIXES = ('.jpg', '.jpeg')
+PNG_SUFFIXES = ('.png',)
+IMAGE_SUFFIXES = JPEG_SUFFIXES + PNG_SUFFIXES
+TILE = 64
 
 
 def human(n_bytes):
@@ -54,6 +63,27 @@ def psnr(img_a, img_b):
     return 20 * math.log10(255.0 / math.sqrt(mse))
 
 
+def worst_tile_psnr(img_a, img_b, tile=TILE):
+    """逐塊（預設 64px）算 PSNR，回傳最差那塊的 (dB, x, y)。
+
+    整張 PSNR 會被大片平坦區稀釋；衣服明暗漸層上的色斑只佔一小塊，
+    要看最差區塊才抓得到。完全相同的區塊略過；整張都相同則回 (99.0, 0, 0)。
+    """
+    diff = ImageChops.difference(img_a, img_b)
+    w, h = diff.size
+    tile = max(1, min(tile, w, h))
+    worst, where = None, (0, 0)
+    for top in range(0, h - tile + 1, tile):
+        for left in range(0, w - tile + 1, tile):
+            rms = ImageStat.Stat(diff.crop((left, top, left + tile, top + tile))).rms
+            mse = sum(v * v for v in rms) / len(rms)
+            if mse > 0 and (worst is None or mse > worst):
+                worst, where = mse, (left, top)
+    if worst is None:
+        return 99.0, 0, 0
+    return 20 * math.log10(255.0 / math.sqrt(worst)), where[0], where[1]
+
+
 def collect_samples(input_path, count, workdir):
     """依輸入型態取出要測試的 JPG，回傳 [(顯示名稱, 磁碟路徑), ...]。
 
@@ -69,9 +99,9 @@ def collect_samples(input_path, count, workdir):
         try:
             with zipfile.ZipFile(p, 'r') as zf:
                 members = [it for it in zf.infolist()
-                           if not it.is_dir() and it.filename.lower().endswith(JPEG_SUFFIXES)]
+                           if not it.is_dir() and it.filename.lower().endswith(IMAGE_SUFFIXES)]
                 if not members:
-                    print(f"❌ 壓縮包裡沒有 JPG：{p.name}")
+                    print(f"❌ 壓縮包裡沒有 JPG / PNG：{p.name}")
                     return []
                 members.sort(key=lambda it: it.file_size, reverse=True)
                 picked = []
@@ -86,14 +116,14 @@ def collect_samples(input_path, count, workdir):
             return []
 
     if p.is_file():
-        if p.suffix.lower() not in JPEG_SUFFIXES:
-            print(f"❌ 不是 JPG：{p.name}")
+        if p.suffix.lower() not in IMAGE_SUFFIXES:
+            print(f"❌ 不是 JPG / PNG：{p.name}")
             return []
         return [(p.name, p)]
 
-    files = [f for f in p.rglob('*') if f.is_file() and f.suffix.lower() in JPEG_SUFFIXES]
+    files = [f for f in p.rglob('*') if f.is_file() and f.suffix.lower() in IMAGE_SUFFIXES]
     if not files:
-        print(f"❌ 資料夾裡沒有 JPG：{p}")
+        print(f"❌ 資料夾裡沒有 JPG / PNG：{p}")
         return []
     files.sort(key=lambda f: f.stat().st_size, reverse=True)
     return [(f.name, f) for f in files[:count]]
@@ -145,40 +175,54 @@ def make_diff_map(orig, variant, out_path, amplify=12):
     diff.save(out_path)
 
 
-def run_one(display_name, jpg_path, qualities, out_dir, report):
-    """對單一張圖跑完整測試，並把結果寫進 report。"""
+def run_one(display_name, src_path, qualities, out_dir, report):
+    """對單一張圖跑完整測試，並把結果寫進 report。
+
+    JPG：重壓路徑，比對「來源 JPG 解碼結果」。
+    PNG：轉 JPG 路徑，比對 PNG 本身（真正的無損原圖，量到的是完整的轉檔損失）。
+    """
     safe = clean_str(display_name)
     stem = Path(display_name).stem.replace('/', '_').replace('\\', '_')[:60]
-    orig_bytes = jpg_path.stat().st_size
+    is_png = src_path.suffix.lower() in PNG_SUFFIXES
+    orig_bytes = src_path.stat().st_size
 
     try:
-        with Image.open(jpg_path) as im:
-            orig = im.convert('RGB')
+        with Image.open(src_path) as im:
+            orig = to_rgb(im)
+            orig.load()
     except Exception as e:
         print(f"  ❌ 無法開啟 [{safe}]：{e}")
         return
 
-    auto_q, ratio, kind = pick_quality_for(orig)
-    kind_txt = '平塗(賽璐璐類)' if kind == 'flat' else '寫實(照片類)'
-    info = (f"   原檔 {orig.size[0]}x{orig.size[1]}  {human(orig_bytes)}\n"
-            f"   內容判定: 顏色數佔比 {ratio * 100:.2f}% "
-            f"(門檻 {JPEG_FLAT_COLOR_RATIO * 100:.0f}%) → {kind_txt}，自動選用 Q{auto_q}")
+    if is_png:
+        info = (f"   原檔 PNG {orig.size[0]}x{orig.size[1]}  {human(orig_bytes)}\n"
+                f"   流程: PNG 轉 JPG，固定 Q{QUALITY}（config.QUALITY，不分流；Pillow 預設 4:2:0、無 ICC/EXIF）\n"
+                f"   比對對象: PNG 原圖（無損），所以下面的 PSNR 是完整的轉檔損失")
+    else:
+        auto_q, ratio, kind = pick_quality_for(orig)
+        kind_txt = '平塗(賽璐璐類)' if kind == 'flat' else '寫實(照片類)'
+        info = (f"   原檔 {orig.size[0]}x{orig.size[1]}  {human(orig_bytes)}\n"
+                f"   內容判定: 顏色數佔比 {ratio * 100:.2f}% "
+                f"(門檻 {JPEG_FLAT_COLOR_RATIO * 100:.0f}%) → {kind_txt}，自動選用 Q{auto_q}")
     print(f"\n■ {safe}")
     print(info)
     report.append(f"\n■ {safe}")
     report.append(info)
 
-    header = f"   {'品質':<8}{'大小':>12}{'縮減':>9}{'PSNR':>10}"
+    header = f"   {'品質':<8}{'大小':>12}{'縮減':>9}{'整張PSNR':>11}{'最差區塊':>10}"
     print(header)
-    print('   ' + '-' * 39)
+    print('   ' + '-' * 50)
     report.append(header)
 
     variants = []
     for q in qualities:
         try:
-            data = _recompress_bytes(jpg_path, q, JPEG_TARGET_SUBSAMPLING)
+            if is_png:
+                data = encode_png_to_jpeg(orig, q)
+            else:
+                data = _recompress_bytes(src_path, q, JPEG_TARGET_SUBSAMPLING)
         except Exception as e:
-            print(f"   Q{q}: 重壓失敗 {e}")
+            print(f"   Q{q}: 轉換失敗 {e}")
             continue
 
         out_file = out_dir / f"{stem}_q{q}.jpg"
@@ -188,8 +232,10 @@ def run_one(display_name, jpg_path, qualities, out_dir, report):
             variant = vim.convert('RGB')
 
         val = psnr(orig, variant)
+        tile_db, tx, ty = worst_tile_psnr(orig, variant)
+        mark = '  ← 目前流程用這個' if is_png and q == QUALITY else ''
         line = (f"   Q{q:<7}{human(len(data)):>12}"
-                f"{(1 - len(data) / orig_bytes) * 100:>8.1f}%{val:>9.2f} dB")
+                f"{(1 - len(data) / orig_bytes) * 100:>8.1f}%{val:>9.2f} dB{tile_db:>8.1f} dB{mark}")
         print(line)
         report.append(line)
         variants.append((q, variant, len(data)))
@@ -204,6 +250,7 @@ def run_one(display_name, jpg_path, qualities, out_dir, report):
     make_crop_comparison(orig, variants, box, crop_path)
     print(f"   📐 最劣區域對照（100% 原尺寸，取自 Q{worst_q} 差異最大處 {box[0]},{box[1]}）")
     print(f"      → {crop_path.name}")
+    print("   （「最差區塊」= 64px 方塊裡最糟的 PSNR；漸層上的色斑看這欄比整張 PSNR 準，數字越低越要對照 *_crop.png 檢查）")
 
     for q, variant, _ in variants:
         make_diff_map(orig, variant, out_dir / f"{stem}_diff_q{q}.png")
@@ -213,14 +260,17 @@ def run_one(display_name, jpg_path, qualities, out_dir, report):
 def main():
     parser = argparse.ArgumentParser(
         description='用真實檔案實測不同 JPEG 品質的畫質與體積影響（不會修改輸入檔）')
-    parser.add_argument('input', help='.zip 壓縮包 / 資料夾 / 單一 .jpg')
-    parser.add_argument('--qualities', default='80,85,88,92',
-                        help='要測試的品質，逗號分隔（預設 80,85,88,92）')
+    parser.add_argument('input', help='.zip 壓縮包 / 資料夾 / 單一 .jpg 或 .png')
+    parser.add_argument('--qualities', default=None,
+                        help='要測試的品質，逗號分隔（JPG 預設 80,85,88,92；PNG 預設 80,85,90,95）')
     parser.add_argument('--samples', type=int, default=3,
                         help='抽測幾張（取最大的幾張，預設 3）')
     parser.add_argument('--out', default='quality_test_out', help='輸出資料夾')
     args = parser.parse_args()
 
+    if args.qualities is None:
+        looks_png = Path(args.input).suffix.lower() in PNG_SUFFIXES
+        args.qualities = '80,85,90,95' if looks_png else '80,85,88,92'
     try:
         qualities = sorted({int(x) for x in args.qualities.split(',') if x.strip()})
     except ValueError:

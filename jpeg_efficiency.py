@@ -1,4 +1,4 @@
-"""JPG 重壓效率研究工具（獨立執行，輸入檔案唯讀，不會被修改）
+"""JPG 重壓效率 / PNG 轉 JPG 畫質研究工具（獨立執行，輸入檔案唯讀，不會被修改）
 
 回答一個問題：「JPG 重新壓縮為什麼只省 30%，不像 PNG 轉 JPG 能省 90%？」
 對一批 JPG（或單一一張）實測，沿用 resize.py 的編碼與分流函式，所以量到的
@@ -8,15 +8,20 @@
     python jpeg_efficiency.py <輸入> [--samples 30] [--pick random|largest]
                                       [--qualities 70,80,85,90,92,95] [--out 資料夾]
 
-<輸入> 可以是：單一 .jpg / 資料夾 / .zip / .rar / .7z 壓縮包（rar 與 7z 需要 7-Zip）
+<輸入> 可以是：單一 .jpg / .png / 資料夾 / .zip / .rar / .7z 壓縮包（rar 與 7z 需要 7-Zip）
+    資料夾與壓縮包預設只取 JPG；要研究 PNG 轉 JPG 請加 --type png。
+
+PNG 模式量的是「PNG 轉 JPG」（config.QUALITY，與正式轉檔同一份編碼），
+PSNR 與「最差區塊」都是對 PNG 本身（無損原圖）比，所以是完整的轉檔損失。
 
 產出（預設在 jpeg_efficiency_out/）：
     jpeg_efficiency.html   圖表報告（雙擊用瀏覽器開，內嵌 SVG，不需要網路）
     jpeg_efficiency.csv    每張圖的原始數字（Excel 可直接開，方便自己再分析）
 並在終端機印出摘要，可以直接貼給我一起看喵！
 
-PSNR 比的是「重壓後」對「來源 JPG 解碼結果」——量的是這次重壓多損失了多少，
+JPG 模式的 PSNR 比的是「重壓後」對「來源 JPG 解碼結果」——量的是這次重壓多損失了多少，
 不是相對於最原始的畫作。
+「最差區塊」是 64px 方塊裡最糟的 PSNR：整張平均會把局部問題（例如漸層上的色斑）稀釋掉。
 """
 import argparse
 import base64
@@ -42,11 +47,11 @@ from PIL import Image
 from config import (
     BASE_DIR, JPEG_EXTENSIONS, JPEG_LARGE_KB, JPEG_TARGET_QUALITY,
     JPEG_FLAT_QUALITY, JPEG_FLAT_COLOR_RATIO, JPEG_TARGET_SUBSAMPLING,
-    MIN_ARCHIVE_SAVING_RATIO, MAX_WORKERS, TEMP_WORK_DIR,
+    MIN_ARCHIVE_SAVING_RATIO, MAX_WORKERS, TEMP_WORK_DIR, QUALITY,
 )
 from common_utils import clean_str, list_7z_entries, SEVEN_ZIP_PATH
 from jpeg_inspector import inspect_jpeg, classify_jpeg
-from quality_test import psnr
+from quality_test import psnr, worst_tile_psnr
 import resize   # 沿用正式流程的編碼，量到的就是 resize.py 實際會產生的結果
 
 DEFAULT_QUALITIES = (70, 75, 80, 85, 88, 90, 92, 95)
@@ -54,6 +59,7 @@ THUMB_EDGE = 180
 PNG_TYPICAL_SAVING = 0.90      # 使用者觀察到的 PNG→JPG 常見縮減，圖上畫成參考線
 MAX_FAINT_LINES = 60           # 逐檔細線最多畫幾條，免得 SVG 肥到打不開
 TABLE_ROWS = 200
+PNG_EXTENSIONS = ('.png',)
 SEVEN_ZIP_SUFFIXES = ('.rar', '.7z')   # 這兩種交給 7-Zip；.zip 用 Python 內建的 zipfile
 MAX_CMD_CHARS = 16000                  # 一次 7z 指令的成員名稱總長上限，Windows 命令列約 32k 字元
 
@@ -69,6 +75,10 @@ def _scratch_dir():
         except Exception:
             pass
     return None
+
+
+def _kind_name(exts):
+    return 'PNG' if exts == PNG_EXTENSIONS else 'JPG'
 
 
 def _pick(items, count, how, seed):
@@ -98,7 +108,7 @@ def _member_disk_path(workdir, member):
     return Path(workdir).joinpath(*[p for p in re.split(r'[\\/]', member) if p])
 
 
-def _samples_from_7z(p, count, how, seed, min_kb, workdir):
+def _samples_from_7z(p, count, how, seed, min_kb, workdir, exts=JPEG_EXTENSIONS):
     """rar / 7z：先列清單挑出 JPG，再只把被挑中的成員解出來，原檔不動。"""
     exe = SEVEN_ZIP_PATH
     if not exe:
@@ -112,14 +122,14 @@ def _samples_from_7z(p, count, how, seed, min_kb, workdir):
 
     min_bytes = max(0, min_kb) * 1024
     members = [(size, name) for name, size in listing['entries']
-               if name.lower().endswith(JPEG_EXTENSIONS) and size >= min_bytes]
+               if name.lower().endswith(exts) and size >= min_bytes]
     if not members:
-        print(f"❌ 壓縮包裡沒有 >= {min_kb} KB 的 JPG：{p.name}")
+        print(f"❌ 壓縮包裡沒有 >= {min_kb} KB 的 {_kind_name(exts)}：{p.name}")
         return []
 
     chosen = _pick(members, count, how, seed)
     total_mb = sum(size for size, _n in chosen) / 1024 / 1024
-    print(f"📦 {p.name}：共 {len(members)} 張符合條件的 JPG，抽 {len(chosen)} 張"
+    print(f"📦 {p.name}：共 {len(members)} 張符合條件的 {_kind_name(exts)}，抽 {len(chosen)} 張"
           f"（約 {total_mb:.0f} MB）解出來測試...")
     if listing['solid']:
         print("   ⚠️ 這是 solid 壓縮包：要抽出指定成員，7-Zip 得把前面的內容也解碼過一遍，"
@@ -148,7 +158,7 @@ def _samples_from_7z(p, count, how, seed, min_kb, workdir):
     return out
 
 
-def collect_samples(input_path, count, how, seed, min_kb, workdir):
+def collect_samples(input_path, count, how, seed, min_kb, workdir, exts=JPEG_EXTENSIONS):
     """回傳 [(顯示名稱, 磁碟路徑), ...]。zip 只解出被挑中的成員，原檔不動。"""
     p = Path(input_path)
     if not p.exists():
@@ -161,10 +171,10 @@ def collect_samples(input_path, count, how, seed, min_kb, workdir):
             with zipfile.ZipFile(p, 'r') as zf:
                 members = [(it.file_size, it) for it in zf.infolist()
                            if not it.is_dir()
-                           and it.filename.lower().endswith(JPEG_EXTENSIONS)
+                           and it.filename.lower().endswith(exts)
                            and it.file_size >= min_bytes]
                 if not members:
-                    print(f"❌ 壓縮包裡沒有 >= {min_kb} KB 的 JPG：{p.name}")
+                    print(f"❌ 壓縮包裡沒有 >= {min_kb} KB 的 {_kind_name(exts)}：{p.name}")
                     return []
                 chosen = _pick(members, count, how, seed)
                 out = []
@@ -179,19 +189,19 @@ def collect_samples(input_path, count, how, seed, min_kb, workdir):
             return []
 
     if p.is_file() and p.suffix.lower() in SEVEN_ZIP_SUFFIXES:
-        return _samples_from_7z(p, count, how, seed, min_kb, workdir)
+        return _samples_from_7z(p, count, how, seed, min_kb, workdir, exts)
 
     if p.is_file():
-        if p.suffix.lower() not in JPEG_EXTENSIONS:
-            print(f"❌ 不是 JPG：{p.name}")
+        if p.suffix.lower() not in JPEG_EXTENSIONS + PNG_EXTENSIONS:
+            print(f"❌ 不是 JPG / PNG：{p.name}")
             return []
         return [(p.name, p)]       # 指名要看的單一檔案，不套用大小門檻
 
     files = [(f.stat().st_size, f) for f in p.rglob('*')
-             if f.is_file() and f.suffix.lower() in JPEG_EXTENSIONS
+             if f.is_file() and f.suffix.lower() in exts
              and f.stat().st_size >= min_bytes]
     if not files:
-        print(f"❌ 資料夾裡沒有 >= {min_kb} KB 的 JPG：{p}")
+        print(f"❌ 資料夾裡沒有 >= {min_kb} KB 的 {_kind_name(exts)}：{p}")
         return []
     return [(f.name, f) for _s, f in _pick(files, count, how, seed)]
 
@@ -203,6 +213,40 @@ def _thumb_b64(im):
     buf = io.BytesIO()
     t.save(buf, 'JPEG', quality=70)
     return base64.b64encode(buf.getvalue()).decode('ascii')
+
+
+def _measure(ref, data, with_psnr):
+    """編碼結果的大小，以及對參考圖的整張 PSNR 與最差區塊 PSNR。"""
+    entry = {'size': len(data), 'psnr': None, 'tile_psnr': None}
+    if with_psnr:
+        with Image.open(io.BytesIO(data)) as v:
+            back = v.convert('RGB')
+        entry['psnr'] = psnr(ref, back)
+        entry['tile_psnr'] = worst_tile_psnr(ref, back)[0]
+    return entry
+
+
+def analyze_png(path, row, qualities, with_psnr):
+    """PNG 轉 JPG：沿用正式轉檔的編碼（encode_png_to_jpeg），對 PNG 本身（無損原圖）比對。"""
+    size = path.stat().st_size
+    with Image.open(path) as opened:
+        im = resize.to_rgb(opened)
+        im.load()
+    w, h = im.size
+    ratio = resize.color_ratio(im)
+    row.update({
+        'size': size, 'width': w, 'height': h,
+        'est_quality': None, 'subsampling': '4:2:0', 'progressive': False,
+        'bpp': size * 8.0 / (w * h),
+        'action': 'png_convert', 'route': 'P', 'reasons': f'PNG 轉 JPG，固定 Q{QUALITY}',
+        'color_ratio': ratio, 'kind': 'flat' if ratio < JPEG_FLAT_COLOR_RATIO else 'photo',
+        'q_auto': QUALITY, 'thumb': _thumb_b64(im),
+        'lossless_size': None, 'lossless_identical': None,
+    })
+    for q in sorted(set(qualities) | {QUALITY}):
+        row['results'][q] = _measure(im, resize.encode_png_to_jpeg(im, q), with_psnr)
+    row['pipeline_size'] = pipeline_size_after(row)
+    return row
 
 
 def pipeline_route(action):
@@ -218,6 +262,8 @@ def analyze_one(args):
     row = {'name': display, 'error': None, 'results': {}}
     try:
         path = Path(path_str)
+        if path.suffix.lower() in PNG_EXTENSIONS:
+            return analyze_png(path, row, qualities, with_psnr)
         raw = path.read_bytes()
         size = len(raw)
         report = inspect_jpeg(path) or {}
@@ -255,11 +301,7 @@ def analyze_one(args):
         # B：各目標品質重壓（含流程實際會挑的那個品質）
         for q in sorted(set(qualities) | {q_auto}):
             out = resize._encode(im, q, JPEG_TARGET_SUBSAMPLING)
-            entry = {'size': len(out), 'psnr': None}
-            if with_psnr:
-                with Image.open(io.BytesIO(out)) as v:
-                    entry['psnr'] = psnr(im, v.convert('RGB'))
-            row['results'][q] = entry
+            row['results'][q] = _measure(im, out, with_psnr)
 
         row['pipeline_size'] = pipeline_size_after(row)
         return row
@@ -274,6 +316,8 @@ def pipeline_size_after(row):
     route = row.get('route')
     if route == 'B':
         new = row['results'].get(row['q_auto'], {}).get('size')
+    elif route == 'P':
+        new = row['results'].get(QUALITY, {}).get('size')
     elif route == 'A':
         new = row.get('lossless_size')
     else:
@@ -306,7 +350,9 @@ def summarize(rows, qualities):
         after = sum(effective(r, q) for r in have)
         savings = [1 - r['results'][q]['size'] / r['size'] for r in have]
         psnrs = [r['results'][q]['psnr'] for r in have if r['results'][q]['psnr'] is not None]
+        tiles = [r['results'][q]['tile_psnr'] for r in have if r['results'][q].get('tile_psnr') is not None]
         summary['by_q'][q] = {
+            'median_tile': _median(tiles), 'min_tile': min(tiles) if tiles else None,
             'total_savings': 1 - after / orig,
             'median_savings': _median(savings),
             'min_savings': min(savings), 'max_savings': max(savings),
@@ -318,7 +364,7 @@ def summarize(rows, qualities):
     after = sum(r['pipeline_size'] for r in ok)
     summary['pipeline_after'] = after
     summary['pipeline_savings'] = 1 - after / summary['total']
-    summary['routes'] = {k: sum(1 for r in ok if r['route'] == k) for k in ('A', 'B')}
+    summary['routes'] = {k: sum(1 for r in ok if r['route'] == k) for k in ('A', 'B', 'P')}
     summary['routes']['skip'] = sum(1 for r in ok if r['route'] is None)
     summary['kinds'] = {k: sum(1 for r in ok if r['kind'] == k) for k in ('flat', 'photo')}
     lossless = [r for r in ok if r.get('lossless_size')]
@@ -421,6 +467,11 @@ def _text(x, y, s, cls='note', anchor='start'):
     return f'<text class="{cls}" x="{x:.1f}" y="{y:.1f}" text-anchor="{anchor}">{html.escape(s)}</text>'
 
 
+def _is_png(rows):
+    ok = [r for r in rows if not r.get('error')]
+    return bool(ok) and all(r.get('route') == 'P' for r in ok)
+
+
 def chart_savings_vs_quality(rows, summary, qualities):
     """圖1：重壓到各品質，能省多少。粗線是整批合計，細線是每張圖。"""
     ok = [r for r in rows if not r.get('error')]
@@ -438,8 +489,9 @@ def chart_savings_vs_quality(rows, summary, qualities):
     ref = ax.py(PNG_TYPICAL_SAVING)
     inner.append(f'<line class="ref" x1="{ax.ml}" x2="{ax.w - ax.mr}" y1="{ref:.1f}" y2="{ref:.1f}"/>')
     inner.append(_text(ax.ml + 6, ref - 5, f'PNG 轉 JPG 常見約 {PNG_TYPICAL_SAVING * 100:.0f}%'))
-    for q, cls, label in ((JPEG_TARGET_QUALITY, 'mark-photo', '寫實目標'),
-                          (JPEG_FLAT_QUALITY, 'mark-flat', '平塗目標')):
+    marks = (((QUALITY, 'mark-flat', 'PNG 轉檔目前'),) if _is_png(rows)
+             else ((JPEG_TARGET_QUALITY, 'mark-photo', '寫實目標'), (JPEG_FLAT_QUALITY, 'mark-flat', '平塗目標')))
+    for q, cls, label in marks:
         if ax.x0 <= q <= ax.x1:
             x = ax.px(q)
             inner.append(f'<line class="{cls}" x1="{x:.1f}" x2="{x:.1f}" y1="{ax.mt}" y2="{ax.h - ax.mb}"/>')
@@ -491,8 +543,8 @@ def chart_tradeoff(rows, summary, qualities):
     inner.append(_poly(ax, med, 'median'))
     inner.append('</g>')
     for i, (q, (x, y)) in enumerate(zip(qs, med)):
-        cls = ('dot-photo' if q == JPEG_TARGET_QUALITY
-               else 'dot-flat' if q == JPEG_FLAT_QUALITY else 'dot-total')
+        cls = ('dot-flat' if q == QUALITY else 'dot-total') if _is_png(rows) else (
+            'dot-photo' if q == JPEG_TARGET_QUALITY else 'dot-flat' if q == JPEG_FLAT_QUALITY else 'dot-total')
         inner.append(f'<circle class="{cls}" cx="{ax.px(x):.1f}" cy="{ax.py(y):.1f}" r="4">'
                      f'<title>Q{q}：中位數省 {x * 100:.1f}%，PSNR {y:.1f} dB</title></circle>')
         dy = -8 if i % 2 == 0 else 17        # 上下錯開，品質接近時標籤才不會疊在一起
@@ -636,20 +688,30 @@ def _mb(n):
 def render_html(rows, summary, qualities, meta):
     ok = [r for r in rows if not r.get('error')]
     bq = summary['by_q']
-    target_q = JPEG_TARGET_QUALITY if JPEG_TARGET_QUALITY in bq else None
+    png = _is_png(rows)
+    focus_q = QUALITY if png else JPEG_TARGET_QUALITY      # 表格與圖上要強調的品質
+    target_q = focus_q if focus_q in bq else None
+    title = 'PNG 轉 JPG 畫質研究' if png else 'JPG 重壓效率研究'
     parts = [f'<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">'
              f'<meta name="viewport" content="width=device-width,initial-scale=1">'
-             f'<title>JPG 重壓效率研究</title><style>{CSS}</style></head><body><main>']
-    parts.append('<h1>JPG 重壓效率研究</h1>')
+             f'<title>{title}</title><style>{CSS}</style></head><body><main>']
+    parts.append(f'<h1>{title}</h1>')
     parts.append(f'<p class="sub">輸入：{html.escape(clean_str(meta["input"]))} ｜ 樣本 {summary["n"]} 張'
-                 f'（{meta["pick"]}，總計 {_mb(summary["total"])}）｜ 色度抽樣 {JPEG_TARGET_SUBSAMPLING}（4:2:0）'
-                 f'｜ 全部沿用 resize.py 的編碼流程</p>')
+                 f'（{meta["pick"]}，總計 {_mb(summary["total"])}）｜ '
+                 + (f'PNG 轉 JPG 固定 Q{QUALITY}（Pillow 預設 4:2:0）｜ PSNR 對 PNG 原圖比' if png else
+                    f'色度抽樣 {JPEG_TARGET_SUBSAMPLING}（4:2:0）')
+                 + '｜ 全部沿用 resize.py 的編碼流程</p>')
 
-    cards = [(_pct(summary['pipeline_savings']), '目前設定下，流程實際會省'),
-             (f"A {summary['routes']['A']} / B {summary['routes']['B']} / 跳過 {summary['routes']['skip']}",
-              '流程分流（無損 / 重壓 / 不動）'),
-             (f"平塗 {summary['kinds']['flat']} / 寫實 {summary['kinds']['photo']}",
-              f'內容判定（門檻 {JPEG_FLAT_COLOR_RATIO * 100:.0f}%）')]
+    cards = [(_pct(summary['pipeline_savings']), '目前設定下，流程實際會省')]
+    if not png:
+        cards += [(f"A {summary['routes']['A']} / B {summary['routes']['B']} / 跳過 {summary['routes']['skip']}",
+                   '流程分流（無損 / 重壓 / 不動）'),
+                  (f"平塗 {summary['kinds']['flat']} / 寫實 {summary['kinds']['photo']}",
+                   f'內容判定（門檻 {JPEG_FLAT_COLOR_RATIO * 100:.0f}%）')]
+    elif target_q:
+        b = bq[target_q]
+        if b['min_tile'] is not None:
+            cards.append((f"{b['min_tile']:.1f} dB", f'Q{QUALITY} 最差區塊 PSNR（所有樣本中最低）'))
     if 'lossless_savings' in summary:
         same = '像素逐一比對相同 ✔' if summary['lossless_all_identical'] else '⚠ 有像素不同！'
         cards.append((_pct(summary['lossless_savings']), f'只做無損最佳化能省（{same}）'))
@@ -664,47 +726,53 @@ def render_html(rows, summary, qualities, meta):
         parts.append(f'<p class="cap">參考：整包驗收門檻 {gate * 100:.0f}%——若這批樣本就是一整包，'
                      f'目前設定省 {_pct(summary["pipeline_savings"])}，<b>{verdict}</b>被判定效率不足。</p>')
 
-    parts.append('<h2>① 重壓到不同品質，能省多少？</h2>')
-    parts.append('<p class="cap">粗黑線是整批合計，紫線是單張中位數，灰細線是每張圖。虛線是你觀察到的 PNG 轉 JPG 常見縮減——'
-                 '先看看 JPG 重壓這條線離它有多遠。</p>')
+    parts.append('<h2>① ' + ('PNG 轉到不同品質，能省多少？' if png else '重壓到不同品質，能省多少？') + '</h2>')
+    parts.append('<p class="cap">粗黑線是整批合計，紫線是單張中位數，灰細線是每張圖。虛線是你觀察到的 PNG 轉 JPG 常見縮減'
+                 + ('。' if png else '——先看看 JPG 重壓這條線離它有多遠。') + '</p>')
     parts.append(f'<div class="chart">{chart_savings_vs_quality(rows, summary, qualities)}</div>')
 
     parts.append('<h2>② 再省下去，要付出多少畫質？</h2>')
     parts.append('<p class="cap">橫軸越右越省、縱軸越高越接近來源。曲線平緩的地方是划算的，開始陡降的地方就是拐點。</p>')
     parts.append(f'<div class="chart">{chart_tradeoff(rows, summary, qualities)}</div>')
 
-    parts.append('<h2>③ 來源品質決定了能擠多少</h2>')
-    parts.append('<p class="cap">每個點是一張圖。落在 0% 的是流程沒動或重壓後沒變小而保留原檔的。</p>')
-    parts.append(f'<div class="chart">{chart_source_quality(rows)}</div>')
+    if not png:      # PNG 轉檔不看來源品質、也不分平塗/寫實，這兩張圖沒有意義
+        parts.append('<h2>③ 來源品質決定了能擠多少</h2>')
+        parts.append('<p class="cap">每個點是一張圖。落在 0% 的是流程沒動或重壓後沒變小而保留原檔的。</p>')
+        parts.append(f'<div class="chart">{chart_source_quality(rows)}</div>')
 
-    parts.append('<h2>④ 平塗／寫實分流有沒有作用？</h2>')
-    parts.append(f'<p class="cap">門檻左邊的圖走平塗 Q{JPEG_FLAT_QUALITY}，右邊走寫實 Q{JPEG_TARGET_QUALITY}。'
-                 '如果幾乎全部堆在門檻右邊，分流等於沒作用——下面的縮圖可以對照看看判定合不合理。</p>')
-    parts.append(f'<div class="chart">{chart_color_ratio(rows)}</div>')
+        parts.append('<h2>④ 平塗／寫實分流有沒有作用？</h2>')
+        parts.append(f'<p class="cap">門檻左邊的圖走平塗 Q{JPEG_FLAT_QUALITY}，右邊走寫實 Q{JPEG_TARGET_QUALITY}。'
+                     '如果幾乎全部堆在門檻右邊，分流等於沒作用——下面的縮圖可以對照看看判定合不合理。</p>')
+        parts.append(f'<div class="chart">{chart_color_ratio(rows)}</div>')
 
     if target_q:
-        parts.append(f'<h2>⑤ 來源位元率 vs 能省多少（重壓到 Q{target_q}）</h2>')
+        parts.append(f'<h2>{"③" if png else "⑤"} 來源位元率 vs 能省多少（{"轉成" if png else "重壓到"} Q{target_q}）</h2>')
         parts.append('<p class="cap">橫軸是來源每個像素用掉幾個位元。已經很精簡（左邊）的圖沒什麼好擠；很肥（右邊）的才有空間。</p>')
         parts.append(f'<div class="chart">{chart_bpp(rows, target_q)}</div>')
 
     parts.append('<h2>各品質的整批數字</h2>')
     parts.append('<div class="scroll"><table><tr><th>目標品質</th><th>整批縮減</th><th>單張中位數</th>'
-                 '<th>範圍</th><th>PSNR 中位數</th><th>PSNR 最低</th><th>沒變小的張數</th></tr>')
+                 '<th>範圍</th><th>PSNR 中位數</th><th>PSNR 最低</th><th>最差區塊 中位</th><th>最差區塊 最低</th>'
+                 '<th>沒變小的張數</th></tr>')
     for q in sorted(bq):
         b = bq[q]
-        cls = ' class="hl"' if q == JPEG_TARGET_QUALITY else ''
+        cls = ' class="hl"' if q == focus_q else ''
+        tile_med = '—' if b['median_tile'] is None else f"{b['median_tile']:.1f} dB"
+        tile_min = '—' if b['min_tile'] is None else f"{b['min_tile']:.1f} dB"
         psnr_med = '—' if b['median_psnr'] is None else f"{b['median_psnr']:.1f} dB"
         psnr_min = '—' if b['min_psnr'] is None else f"{b['min_psnr']:.1f} dB"
-        parts.append(f'<tr{cls}><td>Q{q}{" ← 寫實目標" if q == JPEG_TARGET_QUALITY else ""}'
-                     f'{" ← 平塗目標" if q == JPEG_FLAT_QUALITY else ""}</td>'
+        label = (" ← PNG 轉檔目前" if q == QUALITY else "") if png else (
+            f'{" ← 寫實目標" if q == JPEG_TARGET_QUALITY else ""}{" ← 平塗目標" if q == JPEG_FLAT_QUALITY else ""}')
+        parts.append(f'<tr{cls}><td>Q{q}{label}</td>'
                      f'<td>{_pct(b["total_savings"])}</td><td>{_pct(b["median_savings"])}</td>'
                      f'<td>{_pct(b["min_savings"], 0)} ~ {_pct(b["max_savings"], 0)}</td>'
-                     f'<td>{psnr_med}</td><td>{psnr_min}</td><td>{b["not_smaller"]}</td></tr>')
+                     f'<td>{psnr_med}</td><td>{psnr_min}</td><td>{tile_med}</td><td>{tile_min}</td>'
+                     f'<td>{b["not_smaller"]}</td></tr>')
     parts.append('</table></div>')
 
     flat_q, photo_q = JPEG_FLAT_QUALITY, JPEG_TARGET_QUALITY
     thresholds = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.60]
-    whatif = whatif_flat_threshold(rows, thresholds, flat_q, photo_q)
+    whatif = [] if png else whatif_flat_threshold(rows, thresholds, flat_q, photo_q)
     if whatif:
         parts.append(f'<h2>如果把平塗判定門檻（JPEG_FLAT_COLOR_RATIO）調高？</h2>')
         parts.append(f'<p class="cap">只算實際走重壓的 {sum(1 for r in ok if r["route"] == "B")} 張；低於門檻走 Q{flat_q}，其餘走 Q{photo_q}。'
@@ -719,7 +787,8 @@ def render_html(rows, summary, qualities, meta):
     gallery = sorted(ok, key=lambda r: r['color_ratio'])[:60]
     if gallery:
         parts.append('<h2>縮圖對照：顏色佔比由低到高</h2>')
-        parts.append('<p class="cap">綠框＝判為平塗，紅框＝判為寫實。看看判成「寫實」的圖，你自己會不會也這樣認為？</p><div class="gallery">')
+        parts.append('<p class="cap">' + ('PNG 轉檔不分流（固定 Q' + str(QUALITY) + '），這裡只是顏色佔比的參考。' if png else
+                     '綠框＝判為平塗，紅框＝判為寫實。看看判成「寫實」的圖，你自己會不會也這樣認為？') + '</p><div class="gallery">')
         for r in gallery:
             kind = 'flat' if r['kind'] == 'flat' else 'photo'
             sav = (1 - r['results'][target_q]['size'] / r['size']) if target_q and target_q in r['results'] else None
@@ -738,7 +807,8 @@ def render_html(rows, summary, qualities, meta):
     parts.append('<div class="scroll"><table><tr>' + ''.join(f'<th>{h}</th>' for h in heads) + '</tr>')
     for r in shown:
         cells = [html.escape(clean_str(r['name'])), _mb(r['size']), f"{r['width']}×{r['height']}",
-                 f"Q{r['est_quality']}" if r['est_quality'] is not None else '?', r['subsampling'] or '?',
+                 f"Q{r['est_quality']}" if r['est_quality'] is not None else ('PNG' if r['route'] == 'P' else '?'),
+                 r['subsampling'] or '?',
                  'prog' if r['progressive'] else 'base', f"{r['bpp']:.2f}", f"{r['color_ratio'] * 100:.1f}% {r['kind']}",
                  r['route'] or '跳過', _pct(1 - r['pipeline_size'] / r['size'])]
         cells += [_pct(1 - r['results'][q]['size'] / r['size']) if q in r['results'] else '—' for q in qshow]
@@ -754,7 +824,7 @@ def write_csv(path, rows, qualities):
             'action', 'route', 'reasons', 'color_ratio', 'kind', 'auto_quality',
             'lossless_bytes', 'lossless_identical', 'pipeline_bytes', 'pipeline_savings', 'error']
     for q in qs:
-        head += [f'q{q}_bytes', f'q{q}_savings', f'q{q}_psnr']
+        head += [f'q{q}_bytes', f'q{q}_savings', f'q{q}_psnr', f'q{q}_worst_tile_psnr']
     with open(path, 'w', newline='', encoding='utf-8-sig') as fh:
         w = csv.writer(fh)
         w.writerow(head)
@@ -776,7 +846,8 @@ def write_csv(path, rows, qualities):
             for q in qs:
                 e = r['results'].get(q)
                 line += ([e['size'], f"{1 - e['size'] / r['size']:.4f}",
-                          '' if e['psnr'] is None else f"{e['psnr']:.2f}"] if e else ['', '', ''])
+                          '' if e['psnr'] is None else f"{e['psnr']:.2f}",
+                          '' if e.get('tile_psnr') is None else f"{e['tile_psnr']:.2f}"] if e else ['', '', '', ''])
             w.writerow(line)
 
 
@@ -791,40 +862,54 @@ def print_summary(rows, summary, qualities, html_path, csv_path):
     if len(ok) <= 5:
         for r in ok:
             print(f"\n■ {clean_str(r['name'])}")
-            print(f"   {r['width']}x{r['height']}  {_mb(r['size'])}  Q{r['est_quality']}  {r['subsampling']}  "
-                  f"{'progressive' if r['progressive'] else 'baseline'}  {r['bpp']:.2f} bpp")
-            print(f"   內容判定: 顏色佔比 {r['color_ratio'] * 100:.2f}%（門檻 {JPEG_FLAT_COLOR_RATIO * 100:.0f}%）"
-                  f" → {'平塗' if r['kind'] == 'flat' else '寫實'}，自動選 Q{r['q_auto']}")
-            print(f"   流程判斷: {r['action']} → 走 {r['route'] or '跳過'}"
-                  + (f"（{r['reasons']}）" if r['reasons'] else ''))
+            src = 'PNG' if r['route'] == 'P' else f"Q{r['est_quality']}  {r['subsampling']}  " \
+                  f"{'progressive' if r['progressive'] else 'baseline'}"
+            print(f"   {r['width']}x{r['height']}  {_mb(r['size'])}  {src}  {r['bpp']:.2f} bpp")
+            if r['route'] == 'P':
+                print(f"   流程: PNG 轉 JPG，固定 Q{QUALITY}（不分流）；顏色佔比 {r['color_ratio'] * 100:.2f}% 僅供參考")
+            else:
+                print(f"   內容判定: 顏色佔比 {r['color_ratio'] * 100:.2f}%（門檻 {JPEG_FLAT_COLOR_RATIO * 100:.0f}%）"
+                      f" → {'平塗' if r['kind'] == 'flat' else '寫實'}，自動選 Q{r['q_auto']}")
+                print(f"   流程判斷: {r['action']} → 走 {r['route'] or '跳過'}"
+                      + (f"（{r['reasons']}）" if r['reasons'] else ''))
             if r['lossless_size']:
                 tag = '像素相同 ✔' if r['lossless_identical'] else '⚠ 像素不同'
                 print(f"   A 無損:    {_mb(r['lossless_size']):>10}  省 {_pct(1 - r['lossless_size'] / r['size']):>6}  （{tag}）")
-            print(f"   {'目標品質':<10}{'大小':>11}{'縮減':>9}{'PSNR':>11}")
+            print(f"   {'目標品質':<10}{'大小':>11}{'縮減':>9}{'PSNR':>11}{'最差區塊':>11}")
             for q in sorted(r['results']):
                 e = r['results'][q]
-                mark = '  ← 流程實際用這個' if q == r['q_auto'] and r['route'] == 'B' else ''
+                mark = '  ← 流程實際用這個' if q == r['q_auto'] and r['route'] in ('B', 'P') else ''
                 ps = '—' if e['psnr'] is None else f"{e['psnr']:.2f} dB"
-                print(f"   Q{q:<9}{_mb(e['size']):>11}{_pct(1 - e['size'] / r['size']):>9}{ps:>11}{mark}")
+                ts = '—' if e.get('tile_psnr') is None else f"{e['tile_psnr']:.1f} dB"
+                print(f"   Q{q:<9}{_mb(e['size']):>11}{_pct(1 - e['size'] / r['size']):>9}{ps:>11}{ts:>11}{mark}")
             print(f"   ➜ 流程實際結果: {_mb(r['size'])} → {_mb(r['pipeline_size'])}  "
                   f"省 {_pct(1 - r['pipeline_size'] / r['size'])}")
     else:
-        print(f"{'目標品質':<10}{'整批縮減':>10}{'中位數':>9}{'PSNR中位':>11}{'PSNR最低':>11}{'沒變小':>8}")
+        png = _is_png(rows)
+        print(f"{'目標品質':<10}{'整批縮減':>10}{'中位數':>9}{'PSNR中位':>11}{'PSNR最低':>11}{'區塊中位':>11}{'區塊最低':>11}{'沒變小':>8}")
         for q in sorted(summary['by_q']):
             b = summary['by_q'][q]
             ps = '—' if b['median_psnr'] is None else f"{b['median_psnr']:.1f} dB"
             pm = '—' if b['min_psnr'] is None else f"{b['min_psnr']:.1f} dB"
-            mark = '  ← 寫實目標' if q == JPEG_TARGET_QUALITY else ('  ← 平塗目標' if q == JPEG_FLAT_QUALITY else '')
-            print(f"Q{q:<9}{_pct(b['total_savings']):>10}{_pct(b['median_savings']):>9}{ps:>11}{pm:>11}{b['not_smaller']:>8}{mark}")
-        qdist = {}
-        for r in ok:
-            key = (r['est_quality'], r['subsampling'])
-            qdist[key] = qdist.get(key, 0) + 1
-        top = sorted(qdist.items(), key=lambda kv: -kv[1])[:5]
-        print('\n來源品質分布: ' + '、'.join(f"Q{k[0]} {k[1]}×{n}" for k, n in top))
-        print(f"內容判定: 平塗 {summary['kinds']['flat']} / 寫實 {summary['kinds']['photo']}"
-              f"（顏色佔比中位數 {_median([r['color_ratio'] for r in ok]) * 100:.1f}%，門檻 {JPEG_FLAT_COLOR_RATIO * 100:.0f}%）")
-        print(f"流程分流: A 無損 {summary['routes']['A']} / B 重壓 {summary['routes']['B']} / 跳過 {summary['routes']['skip']}")
+            tm = '—' if b['median_tile'] is None else f"{b['median_tile']:.1f} dB"
+            tn = '—' if b['min_tile'] is None else f"{b['min_tile']:.1f} dB"
+            if png:
+                mark = '  ← PNG 轉檔目前' if q == QUALITY else ''
+            else:
+                mark = '  ← 寫實目標' if q == JPEG_TARGET_QUALITY else ('  ← 平塗目標' if q == JPEG_FLAT_QUALITY else '')
+            print(f"Q{q:<9}{_pct(b['total_savings']):>10}{_pct(b['median_savings']):>9}{ps:>11}{pm:>11}"
+                  f"{tm:>11}{tn:>11}{b['not_smaller']:>8}{mark}")
+        print("（區塊 = 64px 方塊裡最糟的 PSNR；漸層色斑看這欄比整張 PSNR 準）")
+        if not png:
+            qdist = {}
+            for r in ok:
+                key = (r['est_quality'], r['subsampling'])
+                qdist[key] = qdist.get(key, 0) + 1
+            top = sorted(qdist.items(), key=lambda kv: -kv[1])[:5]
+            print('\n來源品質分布: ' + '、'.join(f"Q{k[0]} {k[1]}×{n}" for k, n in top))
+            print(f"內容判定: 平塗 {summary['kinds']['flat']} / 寫實 {summary['kinds']['photo']}"
+                  f"（顏色佔比中位數 {_median([r['color_ratio'] for r in ok]) * 100:.1f}%，門檻 {JPEG_FLAT_COLOR_RATIO * 100:.0f}%）")
+            print(f"流程分流: A 無損 {summary['routes']['A']} / B 重壓 {summary['routes']['B']} / 跳過 {summary['routes']['skip']}")
         if 'lossless_savings' in summary:
             tag = '像素逐一比對相同 ✔' if summary['lossless_all_identical'] else '⚠ 有像素不同'
             print(f"只做無損最佳化: 省 {_pct(summary['lossless_savings'])}（{tag}）")
@@ -838,13 +923,15 @@ def print_summary(rows, summary, qualities, html_path, csv_path):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description='JPG 重壓效率研究：實測各品質能省多少、畫質代價、分流是否有作用（輸入唯讀）')
-    parser.add_argument('input', help='單一 .jpg / 資料夾 / .zip / .rar / .7z')
+    parser.add_argument('input', help='單一 .jpg / .png / 資料夾 / .zip / .rar / .7z')
+    parser.add_argument('--type', choices=('jpg', 'png'), default='jpg', dest='kind',
+                        help='資料夾與壓縮包要取哪一種（預設 jpg；png = 研究 PNG 轉 JPG）。單一檔案依副檔名')
     parser.add_argument('--samples', type=int, default=30, help='抽測幾張（預設 30）')
     parser.add_argument('--pick', choices=('random', 'largest'), default='random',
                         help='怎麼挑：random 隨機（預設，較有代表性）/ largest 挑最大的')
     parser.add_argument('--seed', type=int, default=1, help='隨機種子，固定它才能重現同一批樣本')
-    parser.add_argument('--min-kb', type=int, default=JPEG_LARGE_KB,
-                        help=f'只取不小於這個大小的 JPG（預設 {JPEG_LARGE_KB}，與 analysis 判斷「過大」相同；0 = 不限）')
+    parser.add_argument('--min-kb', type=int, default=None,
+                        help=f'只取不小於這個大小的檔案（JPG 預設 {JPEG_LARGE_KB}，與 analysis 判斷「過大」相同；PNG 預設 0；0 = 不限）')
     parser.add_argument('--qualities', default=','.join(map(str, DEFAULT_QUALITIES)),
                         help='要掃描的目標品質，逗號分隔')
     parser.add_argument('--no-psnr', action='store_true', help='不算 PSNR（快很多，但沒有畫質代價那張圖）')
@@ -863,17 +950,25 @@ def main(argv=None):
         print('❌ 品質必須在 1~100 之間')
         return 1
 
+    if Path(args.input).is_file() and Path(args.input).suffix.lower() in PNG_EXTENSIONS:
+        args.kind = 'png'            # 指名單一 PNG 就一定是要看 PNG 轉檔
+    exts = PNG_EXTENSIONS if args.kind == 'png' else JPEG_EXTENSIONS
+    if args.min_kb is None:
+        args.min_kb = 0 if args.kind == 'png' else JPEG_LARGE_KB
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print('=' * 70)
-    print('🔬 JPG 重壓效率研究（輸入檔案唯讀，不會被修改）')
+    print('🔬 PNG 轉 JPG 畫質研究' if args.kind == 'png' else '🔬 JPG 重壓效率研究', end='')
+    print('（輸入檔案唯讀，不會被修改）')
     print(f'   掃描品質: {", ".join("Q" + str(q) for q in qualities)}')
-    print(f'   編碼方式: 沿用 resize.py（色度抽樣 {JPEG_TARGET_SUBSAMPLING}、progressive、mozjpeg 無損擠壓）')
+    print(f'   編碼方式: 沿用 resize.py（PNG 轉檔 Q{QUALITY}、Pillow 預設抽樣）' if args.kind == 'png' else
+          f'   編碼方式: 沿用 resize.py（色度抽樣 {JPEG_TARGET_SUBSAMPLING}、progressive、mozjpeg 無損擠壓）')
     print('=' * 70)
 
     with tempfile.TemporaryDirectory(dir=_scratch_dir()) as tmp:
-        samples = collect_samples(args.input, args.samples, args.pick, args.seed, args.min_kb, tmp)
+        samples = collect_samples(args.input, args.samples, args.pick, args.seed, args.min_kb, tmp, exts)
         if not samples:
             return 1
         print(f'\n抽測 {len(samples)} 張（{args.pick}），用 {args.workers} 個行程平行處理...\n')
@@ -885,7 +980,8 @@ def main(argv=None):
             for i, fut in enumerate(as_completed(futures), start=1):
                 r = fut.result()
                 rows.append(r)
-                state = f"❌ {r['error']}" if r['error'] else f"Q{r['est_quality']} {_mb(r['size'])}"
+                state = (f"❌ {r['error']}" if r['error'] else
+                         f"{'PNG' if r['route'] == 'P' else 'Q' + str(r['est_quality'])} {_mb(r['size'])}")
                 print(f"  [{i}/{len(jobs)}] {clean_str(r['name'])}  {state}")
 
     order = {name: i for i, (name, _p) in enumerate(samples)}

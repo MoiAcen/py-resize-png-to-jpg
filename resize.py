@@ -311,6 +311,13 @@ def claim_jpg_path(png_path):
         counter += 1
 
 
+def encode_png_to_jpeg(im, quality):
+    """PNG → JPG 的編碼，回傳位元組。正式轉檔與驗證工具共用，量到的才是實際會產生的結果。"""
+    buf = io.BytesIO()
+    im.save(buf, format='JPEG', quality=quality, optimize=True)
+    return buf.getvalue()
+
+
 def convert_single_image_worker(args):
     """Worker：將單張 PNG 轉為 JPG。只有轉出更小才保留並刪除原 PNG。
 
@@ -334,7 +341,8 @@ def convert_single_image_worker(args):
         with Image.open(img_path) as img:
             img = to_rgb(img)
 
-            img.save(jpg_path, format='JPEG', quality=quality, optimize=True)
+            data = encode_png_to_jpeg(img, quality)
+        jpg_path.write_bytes(data)
 
         if jpg_path.stat().st_size < orig_size:
             try:
